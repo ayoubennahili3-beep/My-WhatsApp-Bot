@@ -1,0 +1,131 @@
+const { default: makeWASocket, useMultiFileAuthState, Browsers, DisconnectReason } = require('@whiskeysockets/baileys');
+const readline = require('readline');
+const pino = require('pino');
+const fs = require('fs'); 
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
+
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));                
+
+// معرف الواتساب الخاص بصاحب البوت للتحكم التام
+const ownerNumber = "212704777168@s.whatsapp.net";
+// مسار الصورة الخاص بك في جهازك
+const imagePath = "/storage/emulated/0/image 1.jpg";
+
+async function start() {
+  // إنشاء أو جلب الجلسة النظيفة
+  const { state, saveCreds } = await useMultiFileAuthState('./session');
+
+  const sock = makeWASocket({
+    auth: state,
+    logger: pino({ level: 'warn' }),
+    printQRInTerminal: false, 
+    browser: Browsers.macOS('Desktop'), 
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    syncFullHistory: false
+  });
+
+  if (!sock.authState.creds.registered) {
+    let phoneNumber = (await question('📱 أدخل رقم واتساب مع رمز الدولة، أرقام فقط (مثال: 212704777168): ')).replace(/\D/g, '');
+
+    if (!/^\d{8,15}$/.test(phoneNumber)) {
+      console.log('❌ رقم الهاتف غير صالح. أعد تشغيل البرنامج.');
+      rl.close();
+      return;
+    }
+
+    try {
+      console.log('🔄 جاري تهيئة الاتصال المشفر آمن بالسيرفر، يرجى الانتظار قليلاً...');
+      // انتظار لـ 5 ثوانٍ كاملة لتثبيت السوكيت ومنع حدوث أخطاء كود التشفير
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const code = await sock.requestPairingCode(phoneNumber);
+      console.log('\n========================================');
+      console.log('🔑 كود اقتران واتساب الجديد والمستقر هو: \x1b[32m' + code + '\x1b[0m');
+      console.log('========================================\n');
+      console.log('افتح واتساب > الأجهزة المرتبطة > ربط جهاز > الربط برقم الهاتف وأدخل الكود الموضح.');
+    } catch (error) {
+      console.error('❌ فشل طلب كود الاقتران من السيرفر:', error.message);
+      rl.close();
+      return;
+    }
+  }
+
+  // حفظ بيانات الجلسة تلقائياً
+  sock.ev.on('creds.update', saveCreds);
+
+  // معالج قراءة الأوامر (الاستجابة لأحمد فقط)
+  sock.ev.on('messages.upsert', async (chatUpdate) => {
+    try {
+      const msg = chatUpdate.messages[0]; 
+      if (!msg || !msg.message || msg.key.fromMe) return; 
+
+      const from = msg.key.remoteJid;
+      const sender = msg.key.participant || msg.key.remoteJid;
+
+      // أمان تام: البوت لا يطيع إلا رقمك الخاص (أحمد)
+
+      const messageText = msg.message.conversation || 
+                          msg.message.extendedTextMessage?.text || 
+                          '';
+      
+      const cleanMessage = messageText.trim().toLowerCase();
+
+      // تفعيل أمر .اوامر لعرض البطاقة الفخمة مع صورتك
+      if (cleanMessage === '.اوامر') {
+         const introText = `༺𖤍༻ 𝑰'𝒎 𝑨𝒉𝒎𝒆𝒅 🍁
+
+*أَنـا أَحـمـد، خُـضـتُ مَـعـاركَ لـم يَـشـهـدْهـا أَحـد، ولـم أَشـكُ حُـزنـي لـغـيـر خـالـقـي ،  أَعـيـشُ تَـحـتَ ظِـلّ الـعِـزّةِ يَـومـًا ، ولا أَرضـى بِـالـمَـذَلّةِ أَلـفَ عـام.*
+
+*المُـتـاحُ لـي لا يَـتـاحُ لـلـجَـمـيـع، والمُـتـاحُ لـلـجَـمـيـع لا يَـتـاحُ لـلي... 🌹*
+
+『𝑩𝒐𝒓𝒏 𝒕𝒐 𝒓𝒖𝒍𝒆 𝒎𝒚 𝒇𝒂𝒕𝒆』 𖤍𖤍
+
+🍁 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ツ 🤍 : 𓆩 🌹 𝐓𝐡𝐞 𝐏𝐫𝐢𝐧𝐜𝐞 🌹 𓆪`;
+
+         if (fs.existsSync(imagePath)) {
+            await sock.sendMessage(from, { 
+               image: fs.readFileSync(imagePath), 
+               caption: introText 
+            }, { quoted: msg });
+            console.log(`✅ تم إرسال بطاقتك بنجاح وبأمان.`);
+         } else {
+            await sock.sendMessage(from, { text: introText }, { quoted: msg });
+            console.log(`⚠️ تم إرسال النص لعدم توفر الصورة بالمسار.`);
+         }
+      }
+
+    } catch (err) {
+      console.error('❌ خطأ أثناء تشغيل معالج الرسائل:', err);
+    }
+  });
+
+  // إدارة الاتصال وإعادة التشغيل الآلي
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect } = update;
+
+    if (connection === 'open') {
+      console.log('✅ أهلاً بك مجدداً! البوت متصل الآن بنظام كود الاقتران ويعمل بكفاءة مطلقة يا أحمد.');
+    }
+
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.error('تفاصيل الخطأ:', lastDisconnect?.error?.message, '| رمز الحالة:', statusCode);
+      if (statusCode !== DisconnectReason.loggedOut) {
+         console.log('🔄 جاري المحافظة على استقرار الجلسة وإعادة الاتصال التلقائي...');
+         start(); 
+      } else {
+         console.log('⚠️ تم تسجيل الخروج، يرجى إعادة طلب كود اقتران جديد.');
+         rl.close();
+      }
+    }
+  });
+}
+
+start().catch((error) => {
+  console.error('💥 خطأ غير متوقع:', error);
+});

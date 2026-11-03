@@ -1,0 +1,117 @@
+const fs = require('fs');
+const path = require('path');
+
+const keyFile = path.join(process.env.HOME, '.config', 'cloudflare.env');
+
+if (fs.existsSync(keyFile)) {
+    for (const line of fs.readFileSync(keyFile, 'utf8').split(/\r?\n/)) {
+        const i = line.indexOf('=');
+        if (i < 0) continue;
+
+        const key = line.slice(0, i).trim();
+        const value = line.slice(i + 1).trim();
+
+        if (key === 'CLOUDFLARE_API_TOKEN' ||
+            key === 'CLOUDFLARE_ACCOUNT_ID') {
+            process.env[key] = value;
+        }
+    }
+}
+
+module.exports = async function handleImagine(mek, body, from, sock) {
+    const text = body || '';
+    const match = text.match(/^[.!]?\s*تخيل\s+([\s\S]+)/i);
+
+    if (!/^[.!]?\s*تخيل(?:\s|$)/i.test(text)) return false;
+
+    if (!match || !match[1].trim()) {
+        await sock.sendMessage(from, {
+            text: '🎨 اكتب وصف الصورة بعد الأمر.\nمثال:\n.تخيل رجل خائف يهرب من ديناصور وسط غابة'
+        }, { quoted: mek });
+        return true;
+    }
+
+    try {
+        const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+        const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+
+        if (!apiToken || !accountId) {
+            throw new Error('مفتاح Cloudflare أو Account ID غير موجود في ملف الإعدادات.');
+        }
+
+        const userPrompt = match[1].trim();
+
+        await sock.sendMessage(from, {
+            text: '▰▰ *جـــاري الـتَّـحْـمـيـل صــــوْرَة* ▰▰ ⏳'
+        }, { quoted: mek });
+
+        const professionalPrompt = `
+Create one exceptionally realistic photograph based on this scene:
+${userPrompt}
+
+VISUAL DIRECTION:
+Photorealistic professional photography, natural human anatomy,
+authentic skin texture, realistic eyes, physically accurate lighting,
+natural shadows, realistic materials, lifelike environmental details,
+cinematic composition, believable depth of field, professional camera
+optics, natural color grading.
+
+Make the result look like a genuine professional photograph.
+Preserve the requested scene, subjects, actions and environment.
+No captions, watermarks, logos or decorative text.
+`;
+
+        const url =
+            'https://api.cloudflare.com/client/v4/accounts/' +
+            accountId +
+            '/ai/run/@cf/black-forest-labs/flux-1-schnell';
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + apiToken,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                prompt: professionalPrompt,
+                steps: 4
+            }),
+            signal: AbortSignal.timeout(240000)
+        });
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            console.error('Cloudflare image error:', JSON.stringify(result).slice(0, 3000));
+            const message = result.errors?.map(e => e.message).join('; ');
+            throw new Error(message || 'Cloudflare HTTP ' + response.status);
+        }
+
+        const imageBase64 = result.result?.image;
+
+        if (!imageBase64) {
+            throw new Error('لم ترجع خدمة Cloudflare صورة.');
+        }
+
+        const imageBuffer = Buffer.from(imageBase64, 'base64');
+
+        if (!imageBuffer.length) {
+            throw new Error('الصورة الناتجة فارغة.');
+        }
+
+        await sock.sendMessage(from, {
+            image: imageBuffer,
+            mimetype: 'image/png',
+            caption: '🌹 𝐀𝐘𝐎𝐔𝐁 𝐁𝐎𝐓 | 𝐀𝐈 𝐈𝐌𝐀𝐆𝐄'
+        }, { quoted: mek });
+
+    } catch (error) {
+        console.error('IMAGINE ERROR:', error);
+        await sock.sendMessage(from, {
+            text: '❌ تعذر إنشاء الصورة.\nالسبب: ' +
+                String(error.message || error).slice(0, 700)
+        }, { quoted: mek });
+    }
+
+    return true;
+};

@@ -1,0 +1,126 @@
+const { default: makeWASocket, useMultiFileAuthState, Browsers } = require('@whiskeysockets/baileys');
+const readline = require('readline');
+const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+
+// 💡 عزل وتخزين النصوص الكاملة والفخمة في البداية لضمان عدم نقصانها أو قصها نهائياً
+const TEXT_MENU = `༺𖤍༻ 𝑰'𝒎 𝑨𝒉𝒎𝒆𝒅 🍁
+
+*أَنـا أَحـمـد، خُـضـتُ مَـعـاركَ لـم يَـشـهـدْهـا أَحـد، ولـم أَشـكُ حُـزنـي لـغـيـر خـالـقـي ،  أَعـيـشُ تَـحـتَ ظِـلّ الـعِـزّةِ يَـومـًا ، ولا أَرضـى بِـالـمَ  مَـذَلّةِ أَلـفَ عـام.*
+
+*المُـتـاحُ لـلي لا يَـتـاحُ لـلـجَـمـيـع، والمُـتـاحُ لـلـجَـمـيـع لا يَـتـاحُ لـلي... 🌹*
+
+『𝑩𝒐𝒓𝒏 𝒕𝒐 𝒓𝒖𝒍𝒆 𝒎𝒚 𝒇𝒂𝒕𝒆』 𖤍𖤍
+
+🍁 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ツ 🤍 : 𓆩 🌹 𝐓𝐡𝐞 𝑷𝒓𝒊𝒏𝒄𝒆 🌹 𓆪`;
+
+const TEXT_TEST1 = `𓆩 𝑰 𝒂𝒎 𝑨𝒉𝒎𝒆𝒅 , 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒎𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒆𝒗𝒆𝒓𝒚𝒐𝒏𝒆, 𝒂𝒏𝒅 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒆𝒗𝒆𝒓𝒚𝒐𝒏𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒎𝒆, 𝒂𝒏𝒅 𝒂 𝒎𝒂𝒏 𝒏𝒆𝒗𝒆𝒓 𝒓𝒆𝒗𝒆𝒂𝒍𝒔 𝒉𝒊𝒔 𝒘𝒆𝒂𝒌𝒏𝒆𝒔𝒔 𝒃𝒆𝒇𝒐𝒓𝒆 𝒐𝒕𝒉𝒆𝒓𝒔. 𓆩🌹𓆪`;
+
+const TEXT_TEST2 = `*𓆩 أَلَـا مَـوْتٌ يُـبَـاعُ فَـأَشْـتَـرِيـهِ ، فَـهَـذَا الـعَـيْـشُ لَا خَـيْـرَ فِـيـهِ ، أَلَـا مَـوْتٌ ذُو طَـعْـمٍ يَ  أْتِـي ، يُـخَ  لِّـصُـنِـي مِـنَ الـعِـيْـشِ الـكَـرِيـهِ… 𓆪 🌹*`;
+
+const TEXT_TEST3 = `𓆩 𝑾𝒆 𝒂𝒓𝒆 𝒂𝒏 𝒊𝒅𝒆𝒂, 𝒂𝒏𝒅 𝒊𝒅𝒆𝒂𝒔 𝒏𝒆𝒗𝒆𝒓 𝒅𝒊𝒆 , 𝒆𝒗𝒆𝒏 𝒊𝒇 𝒕𝒉𝒆𝒊𝒓 𝒄𝒓𝒆𝒂𝒕𝒐𝒓 𝒅𝒊𝒆𝒔. ༺ 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ༻ 𓆩🌹𓆪`;
+
+const TEXT_TEST4 = `𖤍 *وَبَقِيَ أَحْمَدُ وَحْدَهُ* 𖤍
+*فَصَارَ الجَيْشَ وَالمَيْدَانَ وَالسَّيْفَ حَارَبَ الدَّهْرَ مُفْرَدًا، فَمَا انْحَنَتْ لَهُ هَامَةٌ، وَلَا انْكَسَرَتْ لَهُ عَزِيمَةٌ بَلْ أَنْبَتَ مِنْ وَحْدَتِهِ طُوفَانًا لَا يُقْهَرُ...*🌹`;
+
+async function start() {
+    const { state, saveCreds } = await useMultiFileAuthState('session-friend');
+    const sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: Browsers.ubuntu('Chrome'),
+        syncFullHistory: false
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = await question('📱 أدخل الرقم مع رمز الدولة: ');
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(phoneNumber.trim());
+                console.log('\n🔑 كود الاقتران هو: ' + code + '\n');
+            } catch (err) { console.log('❌ خطأ: ', err.message); }
+        }, 3000);
+    }
+
+    sock.ev.on('messages.upsert', async chatUpdate => {
+        try {
+            const mek = chatUpdate.messages[0];
+            if (!mek || !mek.message) return;
+            const from = mek.key.remoteJid;
+            const msgType = Object.keys(mek.message)[0];
+            let body = '';
+
+            if (msgType === 'conversation') body = mek.message.conversation;
+            else if (msgType === 'extendedTextMessage') body = mek.message.extendedTextMessage.text;
+            else if (msgType === 'imageMessage') body = mek.message.imageMessage.caption;
+            else if (msgType === 'videoMessage') body = mek.message.videoMessage.caption;
+
+            const prefix = '.';
+            const isCmd = body && body.trim().startsWith(prefix);
+            const command = isCmd ? body.trim().slice(prefix.length).trim().split(/ +/).shift().toLowerCase() : null;
+
+            if (isCmd) {
+                console.log(`📥 [أمر مستلم]: ${body}`);
+                const basePath = '/storage/emulated/0/EDIT NEW/';
+                
+                let editFiles = [];
+                if (fs.existsSync(basePath)) {
+                    editFiles = fs.readdirSync(basePath).filter(file => file.toLowerCase().endsWith('.mp4'));
+                }
+
+                switch (command) {
+                    case 'ping':
+                    case 'فحص':
+                        await sock.sendMessage(from, { text: '🤖 البوت يعمل بنجاح ويستجيب لك يا صاحب الحساب!' }, { quoted: mek });
+                        break;
+
+                    case 'menu':
+                    case 'المنيو':
+                    case 'الاوامر':
+                        const imagePath = '/storage/emulated/0/imenu.jpg/image 1.jpg';
+                        const audioPath = '/storage/emulated/0/Download/Telegram/Aud 100.mp3';
+                        if (fs.existsSync(imagePath)) await sock.sendMessage(from, { image: fs.readFileSync(imagePath), caption: TEXT_MENU }, { quoted: mek });
+                        if (fs.existsSync(audioPath)) await sock.sendMessage(from, { audio: fs.readFileSync(audioPath), mimetype: 'audio/mp4', ptt: false }, { quoted: mek });
+                        break;
+
+                    case 'تست':
+                    case 'test':
+                        if (body.includes('1') || body.includes('١')) {
+                            await sock.sendMessage(from, { text: TEXT_TEST1 }, { quoted: mek });
+                            if (editFiles && editFiles[0]) await sock.sendMessage(from, { video: fs.readFileSync(path.join(basePath, editFiles[0])), ptv: true, mimetype: 'video/mp4' }, { quoted: mek });
+                        } 
+                        else if (body.includes('2') || body.includes('٢')) {
+                            await sock.sendMessage(from, { text: TEXT_TEST2 }, { quoted: mek });
+                            if (editFiles && editFiles[1]) await sock.sendMessage(from, { video: fs.readFileSync(path.join(basePath, editFiles[1])), ptv: true, mimetype: 'video/mp4' }, { quoted: mek });
+                        }
+                        else if (body.includes('3') || body.includes('٣')) {
+                            await sock.sendMessage(from, { text: TEXT_TEST3 }, { quoted: mek });
+                            if (editFiles && editFiles[2]) await sock.sendMessage(from, { video: fs.readFileSync(path.join(basePath, editFiles[2])), ptv: true, mimetype: 'video/mp4' }, { quoted: mek });
+                        }
+                        else if (body.includes('4') || body.includes('٤')) {
+                            const folderPath = '/storage/emulated/0/NEW BOT EDIT/';
+                            await sock.sendMessage(from, { text: TEXT_TEST4 }, { quoted: mek });
+                            if (fs.existsSync(folderPath)) {
+                                const files = fs.readdirSync(folderPath).filter(f => f.toLowerCase().endsWith('.mp4'));
+                                if (files && files[0]) await sock.sendMessage(from, { video: fs.readFileSync(path.join(folderPath, files[0])), ptv: true, mimetype: 'video/mp4' }, { quoted: mek });
+                            }
+                        }
+                        break;
+                }
+            }
+        } catch (err) { console.log('Error: ', err); }
+    });
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection } = update;
+        if (connection === 'open') { console.log('🚀 تم التحديث النهائي القاطع! جميع الأوامر الأربعة بنصوصها الفخمة الكاملة جاهزة الآن!'); }
+        if (connection === 'close') start();
+    });
+}
+start();

@@ -1,0 +1,57 @@
+module.exports = {
+    name: 'تبنيد',
+
+    async execute(sock, m, args) {
+        const jid = m.key.remoteJid;
+
+        const reply = async (text) =>
+            sock.sendMessage(jid, { text }, { quoted: m });
+
+        // تهيئة حالة السماح العامة إذا لم تكن موجودة (افتراضياً: مسموح/true)
+        if (typeof global.tabyeenAllowed === 'undefined') {
+            global.tabyeenAllowed = true;
+        }
+
+        const sub = args?.[0]?.trim();
+
+        // 1. أمر إيقاف أو منع العملية
+        if (sub === 'ايقاف' || sub === 'stop' || sub === 'منع') {
+            global.tabyeenAllowed = false;
+            return reply('🛑 تم تعطيل السماح بعمليات التبنيد وإيقافها بنجاح.');
+        }
+
+        // 2. أمر تفعيل أو السماح بالعملية (الجديد)
+        if (sub === 'تفعيل' || sub === 'سماح' || sub === 'start' || sub === 'تشغيل') {
+            global.tabyeenAllowed = true;
+            return reply('✅ تم منح السماح وتفعيل نظام التبنيد بنجاح.');
+        }
+
+        // التحقق مما إذا كانت الميزة موقوفة تماماً
+        if (!global.tabyeenAllowed) {
+            return reply('⚠️ نظام التبنيد موقوف حالياً. أرسل: `.تبنيد تفعيل` للسماح بالتشغيل.');
+        }
+
+        try {
+            const metadata = await sock.groupFetchAllParticipating();
+            const groups = Object.values(metadata);
+
+            if (!groups.length) {
+                return reply('⚠️ لا توجد مجموعات متاحة.');
+            }
+
+            let text = '📋 *قائمة المجموعات المتاحة للعمليات*\n\n';
+
+            groups.forEach((g, i) => {
+                text += `*${i + 1}.* ${g.subject || 'بدون اسم'}\n`;
+                text += `👥 الأعضاء: ${g.participants?.length || 0}\n\n`;
+            });
+
+            text += '⚙️ للتحكم: \n• `.تبنيد ايقاف` (لتعطيل السماح)\n• `.تبنيد تفعيل` (لإعادة السماح)';
+
+            return reply(text);
+
+        } catch (err) {
+            return reply('❌ خطأ: ' + err.message);
+        }
+    }
+};

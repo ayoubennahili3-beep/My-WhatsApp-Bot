@@ -1,0 +1,407 @@
+const path = require('path');
+const { default: makeWASocket, useMultiFileAuthState, getContentType } = require('@whiskeysockets/baileys');
+const readline = require('readline');
+const pino = require('pino');
+const fs = require('fs');
+const MODE_FILE = path.join(__dirname, 'bot-mode.json');
+let botMode = 'public';
+try {
+    if (fs.existsSync(MODE_FILE)) {
+        const savedMode = JSON.parse(fs.readFileSync(MODE_FILE, 'utf8')).mode;
+        if (savedMode === 'public' || savedMode === 'private') botMode = savedMode;
+    }
+} catch (e) {
+    console.error('تعذر قراءة وضعية البوت المحفوظة:', e.message);
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+
+const TEXT_MENU = `༺𖤍༻ 𝑰'𝒎 𝑨𝒉𝒎𝒆𝒅 🍁
+
+*أَنـا أَحـمـد، خُـضـتُ مَـعـاركَ لـم يَـشـهـدْهـا أَحـد، ولـم أَشـكُ حُـزنـي لـغـيـر خـالـقـي ،  أَعـيـشُ تَـحـتَ ظِـلّ الـعِـزّةِ يَـومـًا ، ولا أَرضـى بِـالـمَ  مَـذَلّةِ أَلـفَ عـام.*
+
+*المُـتـاحُ لـلي لا يَـتـاحُ لـلـجَـمـيـع، والمُـتـاحُ لـلـجَـمـيـع لا يَـتـاحُ لـلي... 🌹*
+
+『𝑩𝒐𝒓𝒏 𝒕𝒐 𝒓𝒖𝒍𝒆 𝒎𝒚 𝒇𝒂𝒕𝒆』 𖤍𖤍
+
+🍁 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ツ 🤍 : 𓆩 🌹 𝐓𝐡𝐞 𝑷𝒓𝒊𝒏𝒄𝒆 🌹 𓆪`;
+
+const TEXT_TEST1 = `𓆩 𝑰 𝒂𝒎 𝑨𝒉𝒎𝒆𝒅 , 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒎𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒆𝒗𝒆𝒓𝒚𝒐𝒏𝒆, 𝒂𝒏𝒅 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒆𝒗𝒆𝒓𝒚𝒐𝒏𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒎𝒆, 𝒂𝒏𝒅 𝒂 𝒎𝒂𝒏 𝒏𝒆𝒗𝒆𝒓 𝒓𝒆𝒗𝒆𝒂𝒍𝒔 𝒉𝒊𝒔 𝒘𝒆𝒂𝒌𝒏𝒆𝒔𝒔 𝒃𝒆𝒇𝒐𝒓𝒆 𝒐𝒕𝒉𝒆𝒓𝒔. 𓆩🌹𓆪`;
+
+const TEXT_TEST2 = `*𓆩 أَلَـا مَـوْتٌ يُـبَـاعُ فَـأَشْـتَـرِيـهِ ، فَـهَـذَا الـعَـيْـشُ لَا خَـيْـرَ فِـيـهِ ، أَلَـا مَـوْتٌ ذُو طَـعْـمٍ يَ  أْتِـي ، يُـخَ  لِّـصُـنِـي مِـنَ الـعِـيْـشِ الـكَـرِيـهِ… 𓆪 🌹*`;
+
+const TEXT_TEST3 = `𓆩 𝑾𝒆 𝒂𝒓𝒆 𝒂𝒏 𝒊𝒅𝒆𝒂, 𝒂𝒏𝒅 𝒊𝒅𝒆𝒂𝒔 𝒏𝒆𝒗𝒆𝒓 𝒅𝒊𝒆 , 𝒆𝒗𝒆𝒏 𝒊𝒇 𝒕𝒉𝒆𝒊𝒓 𝒄𝒓𝒆𝒂𝒕𝒐𝒓 𝒅𝒊𝒆𝒔. ༺ 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ༻ 𓆩🌹𓆪`;
+
+const TEXT_TEST4 = `𖤍 *وَبَقِيَ أَحْمَدُ وَحْدَهُ* 𖤍
+*فَصَارَ الجَيْشَ وَالمَيْدَانَ وَالسَّيْفَ حَارَبَ الدَّهْرَ مُفْرَدًا، فَمَا انْحَنَتْ لَهُ هَامَةٌ، وَلَا انْكَسَرَتْ لَهُ عَزِيمَةٌ بَلْ أَنْبَتَ مِنْ وَحْدَتِهِ طُوفَانًا لَا يُقْهَرُ...*🌹`;
+
+async function start() {
+    const { state, saveCreds } = await useMultiFileAuthState('session');
+    
+    const sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        syncFullHistory: false
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection } = update;
+        if (connection === 'close') {
+            console.log('🔄 انقطع الاتصال، جاري إعادة التشغيل...');
+            start();
+        } else if (connection === 'open') {
+            console.log('✅ تم اتصال البوت بنجاح وهو جاهز الآن لاستقبال الأوامر!');
+        }
+    });
+
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = await question('📲 ادخل رقم البوت مع رمز الدولة (مثال: 212xxxxxxxxx): ');
+        const cleanNumber = phoneNumber.replace(/\D/g, '');
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(cleanNumber);
+                console.log('\n🔑 كود الربط الخاص بك هو: ' + code + '\n');
+            } catch (err) {
+                console.log('❌ خطأ أثناء طلب الكود: ', err.message);
+            }
+        }, 3000);
+    }
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        try {
+            if (type !== 'notify') return;
+
+            for (const mek of messages || []) {
+                if (!mek.message) continue;
+
+                const from = mek.key.remoteJid;
+                if (!from) continue;
+
+                const msg = mek.message;
+                const body = (
+                    msg.conversation ||
+                    msg.extendedTextMessage?.text ||
+                    msg.imageMessage?.caption ||
+                    msg.videoMessage?.caption ||
+                    msg.documentMessage?.caption ||
+                    ''
+                ).trim();
+
+                const match = body.match(/^[.!]?\s*(?:تست|test)\s*([1-4١-٤])\s*$/i);
+                const command = body.replace(/^[.!]/, '').trim().toLowerCase();
+
+                const senderJid = mek.key.fromMe
+                    ? sock.user?.id
+                    : (mek.key.participant || mek.key.remoteJid);
+                const senderNumber = (senderJid || '').split('@')[0].split(':')[0];
+                const developerNumbers = [
+    '212613436438',
+    '212697304172',
+    '212704777168'
+];
+const isDeveloper = developerNumbers.includes(senderNumber);
+
+                if (command === 'عام' || command === 'خاص') {
+                    if (!isDeveloper) {
+                        await sock.sendMessage(from, {
+                            text: '⛔ هذا الأمر مخصص للمطوّر فقط.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    botMode = command === 'عام' ? 'public' : 'private';
+                    fs.writeFileSync(MODE_FILE, JSON.stringify({ mode: botMode }));
+                    await sock.sendMessage(from, {
+                        text: command === 'عام'
+                            ? '🌍 تم تفعيل البوت للجميع.'
+                            : '🔒 تم تفعيل وضع المطوّر فقط.'
+                    }, { quoted: mek });
+                    continue;
+                }
+
+                if (botMode === 'private' && !isDeveloper) continue;
+
+                if (command === 'من هو عظيم') {
+    const videoPath = '/storage/emulated/0/Ahmad/ahmad.mp4';
+
+    await sock.sendMessage(from, {
+        text: '*لَيسَ العَظِيمُ مَن يَمحُو الجِبالَ، بَل مَن تَخرُّ الجِبالُ هَيبَةً لِعُلوِّ مِكراسِهِ... وَأَحْمَدُ عِندَ المَجدِ، نَصْلٌ قاطعٌ في يَدِ الزَّمَانِ، لا يَرى العُلا غايَةً بَل مَقَرّاً دائِماً لِعَرشِهِ...🌹*'
+    }, { quoted: mek });
+
+    if (!fs.existsSync(videoPath)) {
+        await sock.sendMessage(from, {
+            text: '⚠️ لم أجد الفيديو في المسار المحدد: ' + videoPath
+        }, { quoted: mek });
+        continue;
+    }
+
+    await sock.sendMessage(from, {
+        video: fs.readFileSync(videoPath),
+        mimetype: 'video/mp4',
+        ptv: true
+    }, { quoted: mek });
+
+    continue;
+}
+
+
+
+
+                if (command === 'فحص') {
+                    const imagePath = path.join(
+                        process.env.HOME, 'AHMED-BOT', 'images', '720264.jpg'
+                    );
+
+                    const caption = [
+                        '╭━━━〔 🌹 𝐀𝐇𝐌𝐄𝐃 𝐁𝐎𝐓 〕━━━╮',
+                        '',
+                        '✦ مرحبًا بك في بوت أحمد ✦',
+                        '',
+                        '👑 الملك: أحمد',
+                        '⚜️ المطوّر: أيوب',
+                        '🤖 الحالة: يعمل بنجاح',
+                        '',
+                        '╭━━━〔 📜 قائمة الأوامر 〕━━━╮',
+                        '',
+                        '.فحص',
+                        '',
+                        '.تست',
+                        '',
+                        '.تست 1',
+                        '',
+                        '.تست 2',
+                        '',
+                        '.تست 3',
+                        '',
+                        '.تست 4',
+                        '',
+                        '.عام',
+                        '',
+                        '.خاص',
+                        '',
+                        '.من هو عظيم',
+                        '',
+                        '.اقتباس',
+                        '',
+                        '.هيبة',
+                        '',
+                        '╰━━━━━━━━━━━━━━━━━━━━╯',
+                        '',
+                        '🌹 شكرًا لاستخدامك بوت أحمد'
+                    ].join('\n');
+
+                    if (fs.existsSync(imagePath)) {
+                        await sock.sendMessage(from, {
+                            image: fs.readFileSync(imagePath),
+                            caption
+                        }, { quoted: mek });
+                    } else {
+                        await sock.sendMessage(from, {
+                            text: caption + '\n⚠️ صورة البوت غير موجودة.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                if (command === 'اقتباس') {
+    const videoDir = '/storage/emulated/0/HIBA NEW';
+    const indexFile = path.join(process.env.HOME, 'quote_index.json');
+
+    const quotes = [
+        '*ٱلعَظَمَةُ لَيْسَتْ حَرْفاً يُكْتَبُ، بَلْ هِيَ طَوْدٌ شَامِخٌ يَسْتَمِدُّ مِنْهُ الزَّمَانُ مَهَابَتَهُ، وَحَيْثُ يَحُلُّ أَحْمَدُ، يَسْتَحِيلُ الوُجُودُ هَيْبَةً. 🌹*',
+        '*لَا يَسْأَلُ عَنِ المَجْدِ مَنْ كَانَ المَجْدُ طَوْعَ بَنَانِهِ؛ فَـأَحْمَدُ لَيْسَ عَابِراً فِي صَفَحَاتِ الخُلُودِ، بَلْ هُوَ السَّطْرُ الأَوَّلُ وَالعُنْوانُ الأَخِيرُ. 🌹*',
+        '*كُلُّ شَيْءٍ يَنْتَهِي إلَّا العَظَمَةَ الَّتِي تَتَنَفَّسُ مِنَ المَعَانِي؛ وَفِي حَضْرَةِ اسْمِ أَحْمَدَ تَنْحَنِي الأَبْجَدِيَّةُ إجْلالاً لِمَا تَحْمِلُهُ حُرُوفُهُ مِنْ سُلْطَانٍ. 🌹*',
+        '*العُقُولُ العَظِيمَةُ لَا تَبْحَثُ عَنْ نُورٍ، بَلْ هِيَ المِشْكَاةُ الَّتِي تُنِيرُ غَيَاهِبَ التَّارِيخِ؛ وَأَحْمَدُ شَمْسٌ تَرْفُضُ أَنْ تُغِيبَ بَيْنَ ظِلَالِ العَابِرِينَ. 🌹*',
+        '*اَلْحِكْمَةُ الكُبْرَى أَنْ تَرَى الكَوْنَ صَغِيراً أَمَامَ هَامَةِ المَبْدَأ؛ وَأَحْمَدُ فِلْسَفَةٌ حَيَّةٌ، مَنْ قَرَأَهَا أَدْرَكَ أَنَّ العَظَمَةَ قَدْ خُلِقَتْ لِتُطَاعَ لَا لِتُوَصَفَ. 🌹*',
+        '*اَلرُّوقِيُّ الحَقِيقِيُّ هُوَ أَنْ تَكُونَ كَالبَحْرِ، هَادِئاً فِي عُمْقِكَ، مُرْعِباً فِي طُوفَانِكَ؛ وَهَكَذَا هُوَ أَحْمَدُ، سَكِينَةٌ تَخْتَزِنُ وَرَاءَهَا عَاصِفَةَ العَظَمَةِ. 🌹*',
+        '*لَمْ يَكُنِ الوُجُودُ سِوَى صَدَىً لِخُطُوَاتِ العُظَمَاءِ، وَحِينَ يَمْشِي أَحْمَدُ تَتَفَتَّحُ جَادَّةُ الأَبَدِيَّةِ إِيذَاناً بِأَنَّ المَلِكَ قَدْ مَرَّ هُنَا. 🌹*',
+        '*اَلعَظَمَةُ صَمْتٌ نَاطِقٌ يَبْلَعُ ضَوْضَاءَ العَالَمِ؛ وَأَحْمَدُ هُوَ ذَلِكَ الصَّمْتُ المُهِيبُ الَّذِي إِذَا تَكَلَّمَ، خَرَّتِ الأَيَّامُ إِكْبَاراً لِعُلوِّهِ. 🌹*'
+    ];
+
+    let quoteIndex = 0;
+    try {
+        const saved = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+        if (Number.isInteger(saved.index)) {
+            quoteIndex = ((saved.index % quotes.length) + quotes.length) % quotes.length;
+        }
+    } catch (_) {}
+
+    const videoPath = path.join(
+        videoDir,
+        'vid' + String(quoteIndex + 1).padStart(3, '0') + '.mp4'
+    );
+
+    if (!fs.existsSync(videoPath)) {
+        await sock.sendMessage(from, {
+            text: '⚠️ لم أجد الفيديو: ' + videoPath
+        }, { quoted: mek });
+        continue;
+    }
+
+    await sock.sendMessage(from, {
+        text: quotes[quoteIndex]
+    }, { quoted: mek });
+
+    await sock.sendMessage(from, {
+        video: fs.readFileSync(videoPath),
+        mimetype: 'video/mp4',
+        ptv: true
+    }, { quoted: mek });
+
+    const nextIndex = (quoteIndex + 1) % quotes.length;
+    fs.writeFileSync(indexFile, JSON.stringify({ index: nextIndex }));
+
+    continue;
+}
+
+if (command === 'هيبة') {
+    const imageDir = path.join(
+        process.env.HOME,
+        'AHMED-BOT',
+        'images'
+    );
+
+    const quotes = [
+        '*༺𓆩 𝐀𝐇𝐌𝐄𝐃 𓆪༻\nليس كل من اعتلى العرش ملكاً، فأحمد يصنع من حضوره عرشاً ومن صمته هيبةً ⚜️*',
+        '*𖤍 أَحْمَدُ لَا يَطْلُبُ لَفْتَ الأَنْظَارِ، فَإِنَّ لِلْهَيْبَةِ لُغَةً تَسْبِقُ الكَلَامَ 𖤍*',
+        '*༒ حين يحضر أحمد، لا يحتاج المجد إلى تعريف، ولا تحتاج الهيبة إلى صوت 🖤*',
+        '*⚜️ ليس عظيماً من علا على الناس، بل من جعل لاسمه مقاماً لا تبلغه الظلال؛ ذاك هو أحمد ⚜️*',
+        '*𓆩 𝐀𝐇𝐌𝐄𝐃 𓆪 بعض الأسماء تُكتب بالحبر، واسم أحمد تنقشه المواقف في ذاكرة الزمن 🌹*',
+        '*𖤐 لا يقاس مقام أحمد بكثرة الكلام عنه، بل بالأثر الذي يتركه حضوره حين يرحل 𖤐*',
+        '*༺ للهيبة وجوه كثيرة، أما هيبة أحمد فمزيج من الصمت والثبات وعزة النفس ༻*',
+        '*⚔️ لا يطارد أحمد الأضواء؛ يمضي في طريقه، ويترك للمجد مهمة اللحاق به ⚔️*',
+        '*𓆩 ليس العلوّ أن تكون فوق الجميع، بل أن تبقى ثابتاً حين تتغير الوجوه؛ تلك شيمة أحمد 𓆪*',
+        '*༺═── أحمد اسمٌ لا يحتاج إلى ضجيج كي يُذكر، ولا إلى تاج كي يُعرف مقامه ──═༻*',
+        '*𖤍 في زمنٍ يكثر فيه الادعاء، يترك أحمد أفعاله تتحدث، ويترك للهيبة بقية الحكاية 𖤍*',
+        '*🌹 بعض الحضور عابر، وبعضهم يصبح ذكرى؛ أما أحمد فيجعل للحضور معنى وللذكرى مقاماً 🌹*',
+        '*༒ لا تصنعه الألقاب، ولا ترفعه المظاهر؛ أحمد يرفع مقامه بثباته حين تهتز الخطوات ༒*',
+        '*⚜️ للمجد أبواب، وللهيبة أسرار، ولأحمد طريقٌ يشقه بعزيمة لا تستعير قوتها من أحد ⚜️*',
+        '*𓆩 يمرّ البعض في المكان، ويترك أحمد أثراً في الذاكرة؛ فليست كل الخطوات سواء 𓆪*',
+        '*🖤 هدوء أحمد ليس غياباً، وصمته ليس ضعفاً؛ ففي بعض السكون تختبئ أعظم العواصف 🖤*',
+        '*༺ لا يحتاج صاحب المقام إلى إعلان عظمته كل يوم؛ يكفي أن تشهد له مواقفه، وهذا أحمد ༻*',
+        '*⚔️ إذا كان للمجد عنوان، فللثبات حكاية، وللهيبة حضور؛ وفي هذه الحكاية يكتب أحمد اسمه ⚔️*'
+    ];
+
+    try {
+        const images = fs.readdirSync(imageDir)
+            .filter(name => /\.(jpe?g|png|webp)$/i.test(name));
+
+        if (images.length === 0) {
+            await sock.sendMessage(from, {
+                text: '⚠️ لم أجد صوراً داخل مجلد AHMED-BOT/images.'
+            }, { quoted: mek });
+            continue;
+        }
+
+        const stateFile = path.join(imageDir, '.heiba-state.json');
+        let previous = {};
+        try {
+            previous = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        } catch (_) {}
+
+        let imageIndex = Math.floor(Math.random() * images.length);
+        if (images.length > 1 && imageIndex === previous.imageIndex) {
+            imageIndex = (imageIndex + 1) % images.length;
+        }
+
+        let quoteIndex = Math.floor(Math.random() * quotes.length);
+        if (quotes.length > 1 && quoteIndex === previous.quoteIndex) {
+            quoteIndex = (quoteIndex + 1) % quotes.length;
+        }
+
+        fs.writeFileSync(stateFile, JSON.stringify({
+            imageIndex,
+            quoteIndex
+        }));
+
+        const imagePath = path.join(imageDir, images[imageIndex]);
+
+        await sock.sendMessage(from, {
+            image: fs.readFileSync(imagePath),
+            caption: quotes[quoteIndex]
+        }, { quoted: mek });
+
+    } catch (err) {
+        console.error('HEIBA ERROR:', err);
+        await sock.sendMessage(from, {
+            text: '⚠️ وقع خطأ أثناء تشغيل الأمر .هيبة.'
+        }, { quoted: mek });
+    }
+
+    continue;
+}
+
+if (['menu', 'المنيو', 'الاوامر'].includes(command)) {
+                    const imagePath = '/storage/emulated/0/imenu.jpg/image 1.jpg';
+                    const audioPath = '/storage/emulated/0/Download/Telegram/Aud 100.mp3';
+
+                    if (fs.existsSync(imagePath)) {
+                        await sock.sendMessage(from, {
+                            image: fs.readFileSync(imagePath),
+                            caption: TEXT_MENU
+                        }, { quoted: mek });
+                    } else {
+                        await sock.sendMessage(from, { text: TEXT_MENU }, { quoted: mek });
+                    }
+
+                    if (fs.existsSync(audioPath)) {
+                        await sock.sendMessage(from, {
+                            audio: fs.readFileSync(audioPath),
+                            mimetype: 'audio/mpeg',
+                            ptt: false
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                if (!match) continue;
+
+                const digit = match[1].replace(/[١٢٣٤]/g, d => '١٢٣٤'.indexOf(d) + 1);
+                const n = Number(digit);
+                const texts = { 1: TEXT_TEST1, 2: TEXT_TEST2, 3: TEXT_TEST3, 4: TEXT_TEST4 };
+
+                await sock.sendMessage(from, { text: texts[n] }, { quoted: mek });
+
+                if (n <= 3) {
+                    const dir = '/storage/emulated/0/EDIT NEW';
+                    if (fs.existsSync(dir)) {
+                        const files = fs.readdirSync(dir)
+                            .filter(f => f.toLowerCase().endsWith('.mp4'))
+                            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+                        if (files[n - 1]) {
+                            await sock.sendMessage(from, {
+                                video: fs.readFileSync(path.join(dir, files[n - 1])),
+                                mimetype: 'video/mp4',
+                                ptv: true
+                            }, { quoted: mek });
+                        }
+                    }
+                } else {
+                    const dir = '/storage/emulated/0/NEW BOT EDIT';
+                    if (fs.existsSync(dir)) {
+                        const files = fs.readdirSync(dir)
+                            .filter(f => f.toLowerCase().endsWith('.mp4'))
+                            .sort();
+                        if (files[0]) {
+                            await sock.sendMessage(from, {
+                                video: fs.readFileSync(path.join(dir, files[0])),
+                                mimetype: 'video/mp4',
+                                ptv: true
+                            }, { quoted: mek });
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('خطأ معالجة الرسالة:', err);
+        }
+    });
+}
+
+start();
+

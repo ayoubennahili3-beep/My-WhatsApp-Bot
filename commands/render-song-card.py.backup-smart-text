@@ -1,0 +1,47 @@
+import sys, os
+from PIL import Image, ImageDraw, ImageFont
+
+bg, title, channel, duration, output = sys.argv[1:6]
+
+font_dir = os.path.join(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"), "share/fonts/TTF")
+bold = os.path.join(font_dir, "DejaVuSansCondensed-Bold.ttf")
+regular = os.path.join(font_dir, "DejaVuSans.ttf")
+
+base = Image.open(bg).convert("RGBA")
+draw = ImageDraw.Draw(base)
+
+def fit_font(text, font_path, max_size, min_size, max_width):
+    for size in range(max_size, min_size - 1, -1):
+        font = ImageFont.truetype(font_path, size)
+        box = draw.textbbox((0, 0), text, font=font, stroke_width=1)
+        if box[2] - box[0] <= max_width:
+            return font
+    return ImageFont.truetype(font_path, min_size)
+
+def write_value(text, x, y, width, height, font_path, max_size, min_size):
+    text = str(text or "غير معروف").strip()
+    font = fit_font(text, font_path, max_size, min_size, width)
+
+    box = draw.textbbox((0, 0), text, font=font, stroke_width=2)
+    text_height = box[3] - box[1]
+    ty = y + (height - text_height) // 2 - box[1]
+
+    # ظل ولمعة بنفسجية خفيفة
+    draw.text((x+2, ty+3), text, font=font,
+              fill=(70, 0, 120, 220),
+              stroke_width=4, stroke_fill=(100, 20, 180, 150))
+
+    draw.text((x, ty), text, font=font,
+              fill=(255, 255, 255, 255),
+              stroke_width=1, stroke_fill=(190, 140, 255, 180))
+
+# مسح معلومات الأغنية القديمة من القالب
+draw.rectangle((490, 700, 1060, 800), fill=(12, 3, 22, 255))
+draw.rectangle((490, 830, 1010, 910), fill=(12, 3, 22, 255))
+draw.rectangle((490, 950, 780, 1025), fill=(12, 3, 22, 255))
+
+write_value(title,    520, 680, 510, 112, bold,    39, 23)
+write_value(channel,  520, 840, 460, 65,  regular, 32, 20)
+write_value(duration, 520, 955, 230, 65,  bold,    34, 22)
+
+base.save(output, "PNG")

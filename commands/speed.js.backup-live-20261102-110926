@@ -1,0 +1,391 @@
+const fs = require('fs');
+const path = require('path');
+
+module.exports = {
+    name: 'speed',
+
+    async execute(sock, m, args) {
+        const start = process.hrtime.bigint();
+        const jid = m.key.remoteJid;
+
+        const send = async (text, quoted = m) => {
+            return sock.sendMessage(jid, { text }, { quoted });
+        };
+
+        const ms = value => `${value.toFixed(2)}ms`;
+
+        const formatCmd = (cmd, max = 24) => {
+            const name = String(cmd);
+            return name.length > max
+                ? name.substring(0, max - 3) + '...'
+                : name;
+        };
+
+        const getSpeedLevel = avg => {
+            if (avg < 500) return '🟢 سريع';
+            if (avg < 1500) return '🟡 متوسط';
+            return '🔴 بطيء';
+        };
+
+        try {
+            const sentMsg = await send('⚡ جاري تحليل الأداء...');
+
+            const sendTime = Number(
+                process.hrtime.bigint() - start
+            ) / 1e6;
+
+            const statsFile = path.join(
+                process.env.HOME,
+                'bot-speed-stats.json'
+            );
+
+            let data;
+            let lastModified = 'غير معروف';
+
+            try {
+                if (!fs.existsSync(statsFile)) {
+                    return send(
+                        `⏱️ *وقت إرسال الرسالة:* ${ms(sendTime)}\n⚠️ لا توجد إحصائيات محفوظة.`,
+                        sentMsg
+                    );
+                }
+
+                const stat = fs.statSync(statsFile);
+
+                lastModified = new Intl.DateTimeFormat('ar-MA', {
+                    timeZone: 'Africa/Casablanca',
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false
+                }).format(stat.mtime);
+
+                data = JSON.parse(
+                    fs.readFileSync(statsFile, 'utf8')
+                );
+
+                if (
+                    !data ||
+                    typeof data !== 'object' ||
+                    !data.commands ||
+                    typeof data.commands !== 'object' ||
+                    Array.isArray(data.commands)
+                ) {
+                    throw new Error('Invalid statistics structure');
+                }
+
+            } catch (error) {
+                console.error('[SPEED READ ERROR]', error);
+
+                return send(
+                    `⏱️ *وقت إرسال الرسالة:* ${ms(sendTime)}\n⚠️ ملف الإحصائيات تالف أو غير قابل للقراءة.`,
+                    sentMsg
+                );
+            }
+
+            const entries = Object.entries(data.commands);
+
+            let invalidCount = 0;
+            let inconsistentCount = 0;
+            let incompleteCount = 0;
+            let invalidMaxCount = 0;
+            const qualityIssueCommands = new Set();
+            const validCommands = [];
+
+            for (const [cmd, item] of entries) {
+                if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                    invalidCount++;
+                    qualityIssueCommands.add(cmd);
+                    continue;
+                }
+
+                const count = Number(item.count);
+                const avgMs = Number(item.avgMs);
+                const rawTotal = Number(item.totalMs);
+
+                if (
+                    !Number.isSafeInteger(count) ||
+                    count <= 0 ||
+                    item.avgMs === null ||
+                    item.avgMs === undefined ||
+                    item.avgMs === '' ||
+                    !Number.isFinite(avgMs) ||
+                    avgMs < 0
+                ) {
+                    invalidCount++;
+                    qualityIssueCommands.add(cmd);
+                    continue;
+                }
+
+                const hasTotal =
+                    item.totalMs !== null &&
+                    item.totalMs !== undefined &&
+                    item.totalMs !== '';
+
+                let totalMs;
+
+                if (
+                    hasTotal &&
+                    Number.isFinite(rawTotal) &&
+                    rawTotal >= 0
+                ) {
+                    const calculatedAvg = rawTotal / count;
+                    const tolerance = Math.max(5, avgMs * 0.02);
+
+                    if (Math.abs(calculatedAvg - avgMs) > tolerance) {
+                        inconsistentCount++;
+                        qualityIssueCommands.add(cmd);
+                        totalMs = avgMs * count;
+                    } else {
+                        totalMs = rawTotal;
+                    }
+                } else {
+                    incompleteCount++;
+                    qualityIssueCommands.add(cmd);
+                    totalMs = avgMs * count;
+                }
+
+                if (!Number.isFinite(totalMs)) {
+                    invalidCount++;
+                    qualityIssueCommands.add(cmd);
+                    continue;
+                }
+
+                const rawMax = item.maxMs;
+                const hasMax =
+                    rawMax !== null &&
+                    rawMax !== undefined &&
+                    rawMax !== '';
+
+                const maxValue = Number(rawMax);
+
+                let maxMs = null;
+
+                if (
+                    hasMax &&
+                    Number.isFinite(maxValue) &&
+                    maxValue >= avgMs
+                ) {
+                    maxMs = maxValue;
+                } else if (hasMax) {
+                    invalidMaxCount++;
+                    qualityIssueCommands.add(cmd);
+                }
+
+                validCommands.push({
+                    cmd,
+                    count,
+                    avgMs,
+                    totalMs,
+                    maxMs
+                });
+            }
+
+            if (!validCommands.length) {
+                return send(
+                    `⏱️ *وقت إرسال الرسالة:* ${ms(sendTime)}\n⚠️ لا توجد قياسات صالحة حالياً.`,
+                    sentMsg
+                );
+            }
+
+            // الإحصائيات العامة
+            const totalExecutions = validCommands.reduce(
+                (sum, item) => sum + item.count,
+                0
+            );
+
+            const totalTime = validCommands.reduce(
+                (sum, item) => sum + item.totalMs,
+                0
+            );
+
+            if (
+                !Number.isSafeInteger(totalExecutions) ||
+                !Number.isFinite(totalTime)
+            ) {
+                throw new Error('Statistics overflow');
+            }
+
+            const globalAvg = totalTime / totalExecutions;
+
+            // ترتيب السرعة
+            const sortedByAvg = [...validCommands].sort(
+                (a, b) => a.avgMs - b.avgMs
+            );
+
+            const fastest = sortedByAvg[0];
+            const slowest = sortedByAvg[sortedByAvg.length - 1];
+
+            // أسرع أمر موثوق
+            const reliableCommands = validCommands.filter(
+                item => item.count >= 5
+            );
+
+            const fastestReliable = reliableCommands.length
+                ? [...reliableCommands].sort(
+                    (a, b) => a.avgMs - b.avgMs
+                )[0]
+                : null;
+
+            // أكثر 3 أوامر استعمالاً
+            const top3 = [...validCommands]
+                .sort((a, b) =>
+                    b.count - a.count ||
+                    a.avgMs - b.avgMs
+                )
+                .slice(0, 3);
+
+            // تحليل التذبذب التقريبي
+            const spikeCommands = validCommands
+                .filter(item =>
+                    item.maxMs !== null &&
+                    item.avgMs > 0
+                )
+                .map(item => ({
+                    ...item,
+                    spike: (
+                        (item.maxMs - item.avgMs) /
+                        item.avgMs
+                    ) * 100
+                }))
+                .sort((a, b) => b.spike - a.spike);
+
+            const biggestSpike = spikeCommands[0];
+
+            // تصنيف الأوامر
+            const fastCount = validCommands.filter(
+                item => item.avgMs < 500
+            ).length;
+
+            const mediumCount = validCommands.filter(
+                item => item.avgMs >= 500 && item.avgMs < 1500
+            ).length;
+
+            const slowCount = validCommands.filter(
+                item => item.avgMs >= 1500
+            ).length;
+
+            // جودة البيانات: كل أمر متأثر يُحسب مرة واحدة
+            const quality = entries.length > 0
+                ? Math.max(
+                    0,
+                    ((entries.length - qualityIssueCommands.size)
+                        / entries.length) * 100
+                )
+                : 0;
+
+            const lowUsage = validCommands.filter(
+                item => item.count < 5
+            );
+
+            // التقرير
+            let report = `⚡ *TOJI PERFORMANCE SYSTEM*\n`;
+            report += `━━━━━━━━━━━━━━━━━━\n\n`;
+
+            report += `📡 *تقرير الأداء الحقيقي:*\n\n`;
+
+            report += `⏱️ *وقت إرسال رسالة التحليل:* ${ms(sendTime)}\n`;
+            report += `📊 *متوسط سرعة الأوامر:* ${ms(globalAvg)}\n`;
+            report += `🔢 *إجمالي مرات التنفيذ:* ${totalExecutions}\n`;
+            report += `📋 *عدد الأوامر المقاسة:* ${validCommands.length}\n`;
+            report += `📅 *آخر تحديث:* ${lastModified}\n\n`;
+
+            report += `━━━━━━━━━━━━━━━━━━\n`;
+            report += `🏆 *تحليل السرعة*\n\n`;
+
+            report += `🚀 *أسرع أمر إجمالاً:*\n`;
+            report += `.${formatCmd(fastest.cmd)} (${ms(fastest.avgMs)} — ${fastest.count} مرة)\n\n`;
+
+            if (fastestReliable) {
+                report += `🥇 *أسرع أمر موثوق (5+ استعمالات):*\n`;
+                report += `.${formatCmd(fastestReliable.cmd)} (${ms(fastestReliable.avgMs)} — ${fastestReliable.count} مرات)\n\n`;
+            } else {
+                report += `🥇 *أسرع أمر موثوق:* بيانات غير كافية\n\n`;
+            }
+
+            report += `🐢 *أبطأ أمر:*\n`;
+            report += `.${formatCmd(slowest.cmd)} (${ms(slowest.avgMs)} — ${slowest.count} مرة)\n\n`;
+
+            if (biggestSpike) {
+                report += `📈 *أكبر فرق بين المتوسط وأعلى قياس:*\n`;
+                report += `.${formatCmd(biggestSpike.cmd)}\n`;
+                report += `أعلى قياس: ${ms(biggestSpike.maxMs)}\n`;
+                report += `الفرق التقريبي: ${biggestSpike.spike.toFixed(1)}%\n\n`;
+            }
+
+            report += `━━━━━━━━━━━━━━━━━━\n`;
+            report += `⚡ *تصنيف أداء الأوامر:*\n`;
+            report += `🟢 سريع: ${fastCount}\n`;
+            report += `🟡 متوسط: ${mediumCount}\n`;
+            report += `🔴 بطيء: ${slowCount}\n\n`;
+
+            report += `━━━━━━━━━━━━━━━━━━\n`;
+            report += `📊 *أكثر 3 أوامر استعمالاً:*\n\n`;
+
+            top3.forEach((item, index) => {
+                report += `${index + 1}. .${formatCmd(item.cmd)}\n`;
+                report += `   ${item.count} مرة | ${ms(item.avgMs)} | ${getSpeedLevel(item.avgMs)}\n`;
+            });
+
+            report += `\n━━━━━━━━━━━━━━━━━━\n`;
+            report += `🔍 *تحليل الاستخدام:*\n`;
+            report += `📌 أوامر بأقل من 5 استعمالات: ${lowUsage.length}\n`;
+            report += `ℹ️ الأسرع الموثوق يحتاج 5 استعمالات على الأقل.\n`;
+
+            report += `\n━━━━━━━━━━━━━━━━━━\n`;
+            report += `🛡️ *سلامة البيانات:*\n`;
+            report += `✅ سجلات صالحة: ${validCommands.length}\n`;
+            report += `📈 مؤشر جودة البيانات: ${quality.toFixed(1)}%\n`;
+            report += `⚠️ أوامر متأثرة بمشاكل البيانات: ${qualityIssueCommands.size}\n`;
+            report += `⚠️ سجلات غير صالحة: ${invalidCount}\n`;
+            report += `🔍 متوسطات غير متطابقة: ${inconsistentCount}\n`;
+            report += `📌 بيانات ناقصة: ${incompleteCount}\n`;
+            report += `⚠️ قياسات Max غير صالحة: ${invalidMaxCount}\n`;
+
+            report += `\n━━━━━━━━━━━━━━━━━━\n`;
+            report += `🌹 *TOJI FUSHIGURO*`;
+
+            // تقسيم الرسالة عند الضرورة مع الحفاظ على التقرير
+            const maxLength = 3500;
+
+            if (report.length <= maxLength) {
+                await send(report, sentMsg);
+            } else {
+                const parts = report.match(
+                    /[^\n]*(?:\n|$)/g
+                ).filter(Boolean);
+
+                let chunk = '';
+
+                for (const line of parts) {
+                    if (
+                        chunk.length + line.length > maxLength &&
+                        chunk.length > 0
+                    ) {
+                        await send(chunk, sentMsg);
+                        chunk = '';
+                    }
+
+                    chunk += line;
+                }
+
+                if (chunk.trim()) {
+                    await send(chunk, sentMsg);
+                }
+            }
+
+        } catch (error) {
+            console.error('[SPEED COMMAND ERROR]', error);
+
+            try {
+                await send(
+                    '❌ وقع خطأ أثناء تحليل الأداء. راجع سجل Termux.'
+                );
+            } catch (sendError) {
+                console.error('[SPEED ERROR REPORT]', sendError);
+            }
+        }
+    }
+};

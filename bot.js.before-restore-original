@@ -1,0 +1,91 @@
+const { default: makeWASocket, useMultiFileAuthState, getContentType } = require('@whiskeysockets/baileys');
+const readline = require('readline');
+const pino = require('pino');
+const fs = require('fs');
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+
+const TEXT_MENU = "🌟 I'm Ahmed 🍁\n\n- غـل يـنـخ تـرتآ مـلـو ءـحـجآ اـهـنـمـي جـل لـرآـعـم شـفـخ ءـحـجآ اـنّآ\n- غـآـشـي ال عـيـمـجـلـل غـاتـشـلآو ءـعـيـمـجـلـل خـاـشـي ال يـلـل غـآـشـلآ*\n\n『𝕭𝖔𝖗𝖓 𝖙𝖔 𝖗𝖚𝖑𝖊 𝖒𝖞 𝖋𝖆𝒕𝖊』🦏🦏\n\n🍁 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ッ 🖤 ⁝ 🌹 𝑻𝒉𝒆 𝑷𝒓𝒊𝒏𝒄𝒆 🌹 ⁝";
+
+const TEXT_TEST1 = "🦏 𝑰 𝒂𝒎 𝑨𝒉𝒎𝒆𝒅 , 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒗𝒍𝒆 𝒕𝒐 𝒎𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒐𝒕𝒉𝒆𝒓𝒔.";
+const TEXT_TEST2 = "*🦏 فـهـغـلآ اّثـقـد ، مـيـرشـؤأف غـإـسـي ثـم اّلاّ 🦏*";
+const TEXT_TEST3 = "❝ 𝑾𝒆 𝒂𝒓𝒆 𝒂𝒏 𝒊𝒅𝒆𝒂, 𝒂𝒏 𝒊𝒅𝒆𝒂𝒔 𝒏𝒆𝒗𝒆𝒓 𝒅𝒊𝒆 , 𝒆𝒗𝒆𝒏 𝒊𝒇 𝒕𝒉𝒆𝒊𝒓 𝒐𝒘𝒏𝒆𝒓𝒔 𝒅𝒊𝒆 ❞";
+const TEXT_TEST4 = "❝ 🌟فـهدعـو ذمـعأّ يقـبـوّ ❝\n- اّلو ءمّآه فـلّ نّـخـنآ اّجـفّ اـدرّفـم رذّدّلآ درّآحّ ثـيـلّـوّ نّاديّـمـلآو نّريّـجـلآ رّآمـّفّ";
+
+async function start() {
+    const { state, saveCreds } = await useMultiFileAuthState('session');
+    
+    const sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        syncFullHistory: false
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection } = update;
+        if (connection === 'close') {
+            console.log('🔄 انقطع الاتصال، جاري إعادة التشغيل...');
+            start();
+        } else if (connection === 'open') {
+            console.log('✅ تم اتصال البوت بنجاح وهو جاهز الآن لاستقبال الأوامر!');
+        }
+    });
+
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = await question('📲 ادخل رقم البوت مع رمز الدولة (مثال: 212xxxxxxxxx): ');
+        const cleanNumber = phoneNumber.replace(/\D/g, '');
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(cleanNumber);
+                console.log('\n🔑 كود الربط الخاص بك هو: ' + code + '\n');
+            } catch (err) {
+                console.log('❌ خطأ أثناء طلب الكود: ', err.message);
+            }
+        }, 3000);
+    }
+
+    sock.ev.on('messages.upsert', async chatUpdate => { console.log('📥 حدث رسائل:', chatUpdate.type, 'العدد:', chatUpdate.messages?.length);
+        try {
+            if (!chatUpdate.messages || chatUpdate.messages.length === 0) return;
+            const m = chatUpdate.messages[0];
+            if (!m.message || m.key.fromMe) return;
+            
+            const from = m.key.remoteJid;
+            
+            // استخراج النص بأبسط الطرق الممكنة لضمان الاستجابة
+            let body = m.message.conversation || 
+                       (m.message.extendedTextMessage && m.message.extendedTextMessage.text) || 
+                       (m.message.imageMessage && m.message.imageMessage.caption) || 
+                       (m.message.videoMessage && m.message.videoMessage.caption) || '';
+
+            body = body.trim();
+            if (!body) return;
+
+            console.log(`📩 رسالة واردة من [${from}]: ${body}`);
+
+            const cleanText = body.toLowerCase();
+
+            if (cleanText === '.menu' || cleanText === 'menu' || cleanText === '.الاوامر' || cleanText === 'الاوامر') {
+                await sock.sendMessage(from, { text: TEXT_MENU });
+                console.log(`➡️ تم إرسال القائمة بنجاح إلى: ${from}`);
+            } else if (cleanText === '.test1' || cleanText === 'test1') {
+                await sock.sendMessage(from, { text: TEXT_TEST1 });
+            } else if (cleanText === '.test2' || cleanText === 'test2') {
+                await sock.sendMessage(from, { text: TEXT_TEST2 });
+            } else if (cleanText === '.test3' || cleanText === 'test3') {
+                await sock.sendMessage(from, { text: TEXT_TEST3 });
+            } else if (cleanText === '.test4' || cleanText === 'test4') {
+                await sock.sendMessage(from, { text: TEXT_TEST4 });
+            }
+        } catch (e) {
+            console.error('⚠️ خطأ معالجة:', e);
+        }
+    });
+}
+
+start();
+

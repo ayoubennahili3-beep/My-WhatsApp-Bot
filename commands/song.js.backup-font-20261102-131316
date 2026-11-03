@@ -1,0 +1,216 @@
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+const yts = require('yt-search');
+const sharp = require('sharp');
+
+const activeChats = new Set();
+
+function xml(v) {
+    return String(v || 'غير معروف')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function shorten(v, max) {
+    const s = String(v || 'غير معروف').replace(/\s+/g, ' ').trim();
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+
+
+
+
+async function makeCard(title, channel, duration) {
+    const bg = path.join(__dirname, 'toji-song-bg.png');
+    const renderer = path.join(__dirname, 'toji-render-card.py');
+
+    return new Promise((resolve, reject) => {
+        execFile(
+            'python',
+            [renderer, bg, String(title || ''), String(channel || ''), String(duration || '')],
+            {
+                encoding: 'buffer',
+                timeout: 30000,
+                maxBuffer: 12 * 1024 * 1024
+            },
+            (error, stdout, stderr) => {
+                if (error) {
+                    reject(new Error(String(stderr || error.message).trim()));
+                    return;
+                }
+                resolve(stdout);
+            }
+        );
+    });
+}
+
+function runYtDlp(args) {
+    return new Promise((resolve, reject) => {
+        execFile('yt-dlp', args, {
+            timeout: 180000,
+            maxBuffer: 2 * 1024 * 1024,
+            encoding: 'utf8'
+        }, (error, stdout, stderr) => {
+            if (error) {
+                reject(new Error(String(stderr || error.message).trim().slice(-1000)));
+                return;
+            }
+            const result = String(stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
+            if (!result) return reject(new Error('لم يتم العثور على مسار الصوت'));
+            resolve(result);
+        });
+    });
+}
+
+async function execute({ sock, from, mek, query }) {
+    query = String(query || '').trim();
+
+    if (!query) {
+        await sock.sendMessage(from, {
+            text: '🎵 اكتب اسم الأغنية بعد الأمر .اغنية'
+        }, { quoted: mek });
+        return;
+    }
+
+    if (activeChats.has(from)) {
+        await sock.sendMessage(from, {
+            text: '⏳ كاين تحميل أغنية آخر فهاد المحادثة، تسنّى حتى يسالي.'
+        }, { quoted: mek });
+        return;
+    }
+
+    activeChats.add(from);
+    const started = Date.now();
+    let tempDir;
+
+    try {
+        const searchStart = Date.now();
+        const search = await yts(query);
+        const result = search?.videos?.find(v => v && v.url);
+
+        console.log('[SONG] search_ms=' + (Date.now() - searchStart));
+
+        if (!result) {
+            await sock.sendMessage(from, {
+                text: '❌ ما لقيتش نتيجة مناسبة. جرّب اسم الأغنية مع اسم الفنان.'
+            }, { quoted: mek });
+            return;
+        }
+
+        const title = result.title || query;
+        const channel = result.author?.name || result.author || 'غير معروف';
+        const duration = result.timestamp || 'غير معروف';
+
+        try {
+            const card = await makeCard(title, channel, duration);
+            await sock.sendMessage(from, {
+                image: card,
+                mimetype: 'image/png',
+                caption: ''
+            }, { quoted: mek });
+        } catch (e) {
+            console.error('[SONG CARD ERROR]', e.message);
+            await sock.sendMessage(from, {
+                text: '🎧 *AUDIO SEARCH*\n🎵 ' + shorten(title, 100) +
+                '\n👤 ' + shorten(channel, 60) +
+                '\n⏱️ ' + duration +
+                '\n> 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐'
+            }, { quoted: mek });
+        }
+
+        tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'toji-song-'));
+
+        const common = [
+            '--js-runtimes', 'node',
+            '--remote-components', 'ejs:github',
+            '--no-playlist',
+            '--no-warnings',
+            '--quiet',
+            '-N', '4',
+            '--max-filesize', '25M'
+        ];
+
+        let audioPath;
+        let audioType;
+        let downloadStart = Date.now();
+
+        try {
+            audioPath = await runYtDlp([
+                ...common,
+                '-f', 'bestaudio[ext=m4a]',
+                '-o', path.join(tempDir, 'direct.%(ext)s'),
+                '--print', 'after_move:filepath',
+                result.url
+            ]);
+            audioType = 'm4a';
+            console.log('[SONG] direct_m4a_ms=' + (Date.now() - downloadStart));
+        } catch (e) {
+            console.log('[SONG] M4A fallback:', e.message.slice(0, 250));
+            downloadStart = Date.now();
+            audioPath = await runYtDlp([
+                ...common,
+                '-f', 'bestaudio/best',
+                '-x',
+                '--audio-format', 'mp3',
+                '-o', path.join(tempDir, 'fallback.%(ext)s'),
+                '--print', 'after_move:filepath',
+                result.url
+            ]);
+            audioType = 'mp3';
+            console.log('[SONG] fallback_mp3_ms=' + (Date.now() - downloadStart));
+        }
+
+        const resolved = path.resolve(audioPath);
+        if (!resolved.startsWith(path.resolve(tempDir) + path.sep)) {
+            throw new Error('مسار ملف الصوت غير آمن');
+        }
+
+        const stat = await fs.promises.stat(resolved);
+        if (!stat.isFile() || stat.size < 1 || stat.size > 25 * 1024 * 1024) {
+            throw new Error('حجم ملف الصوت غير صالح');
+        }
+
+        const audio = await fs.promises.readFile(resolved);
+        const sendStart = Date.now();
+
+        await sock.sendMessage(from, {
+            audio,
+            mimetype: audioType === 'm4a' ? 'audio/mp4' : 'audio/mpeg',
+            fileName: audioType === 'm4a' ? 'song.m4a' : 'song.mp3'
+        }, { quoted: mek });
+
+        console.log('[SONG] format=' + audioType +
+            ' bytes=' + stat.size +
+            ' send_ms=' + (Date.now() - sendStart) +
+            ' total_ms=' + (Date.now() - started) +
+            ' title=' + shorten(title, 100));
+
+    } catch (err) {
+        console.error('[SONG ERROR]', err.stack || err.message);
+        try {
+            await sock.sendMessage(from, {
+                text: '⚠️ تعذّر جلب الصوت. جرّب لاحقاً أو اختار أغنية أخرى.'
+            }, { quoted: mek });
+        } catch (e) {
+            console.error('[SONG ERROR] send:', e.message);
+        }
+    } finally {
+        activeChats.delete(from);
+        if (tempDir) {
+            try {
+                await fs.promises.rm(tempDir, { recursive: true, force: true });
+            } catch (e) {
+                console.error('[SONG CLEANUP]', e.message);
+            }
+        }
+    }
+}
+
+module.exports = { name: 'اغنية', execute, makeCard };

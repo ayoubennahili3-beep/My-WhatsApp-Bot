@@ -1,0 +1,38 @@
+const fs = require('fs');
+const path = require('path');
+
+const home = process.env.HOME;
+const sourcePath = path.join(home, 'bot-friend.js');
+const listPath = path.join(home, 'bot-commands.json');
+
+function updateCommands() {
+    const source = fs.readFileSync(sourcePath, 'utf8');
+    const oldList = JSON.parse(fs.readFileSync(listPath, 'utf8'));
+
+    const commands = new Set(oldList);
+
+    // الأوامر المكتوبة بصيغة command === 'اسم الأمر'
+    for (const match of source.matchAll(/command\s*===\s*['"]([^'"]+)['"]/g)) {
+        commands.add(match[1].trim());
+    }
+
+    // الأوامر التي تستعمل أنماط مطابقة خاصة
+    const specialCommands = [
+        'حزمة', 'اغنية', 'ارسل',
+        'تست', 'تست 1', 'تست 2', 'تست 3', 'تست 4', 'تست 5',
+    ];
+
+    for (const command of specialCommands) {
+        commands.add(command);
+    }
+
+    const result = [...commands].filter(Boolean).filter(command => !/^test [1-5]$/i.test(command) && command !== '.أشكوا حزني' && command !== 'the two princes');
+    fs.writeFileSync(listPath, JSON.stringify(result, null, 2) + '\n');
+
+    console.log('✅ تحدّثت قائمة الأوامر.');
+    console.log('📋 عدد الأوامر:', result.length);
+    console.log('🔎 أمر حزمة:', result.includes('حزمة') ? 'موجود' : 'غير موجود');
+}
+
+if (require.main === module) updateCommands();
+module.exports = updateCommands;

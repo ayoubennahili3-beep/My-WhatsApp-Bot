@@ -1,0 +1,33 @@
+0 verbose cli /data/data/com.termux/files/usr/bin/node /data/data/com.termux/files/usr/bin/npm
+1 info using npm@11.17.0
+2 info using node@v24.17.0
+3 silly config load:file:/data/data/com.termux/files/usr/lib/node_modules/npm/npmrc
+4 silly config load:file:/data/data/com.termux/files/home/.npmrc
+5 silly config load:file:/data/data/com.termux/files/usr/etc/npmrc
+6 verbose title npm install github:zqdevelopers/zq_baileys_helper~
+7 verbose argv "install" "github:zqdevelopers/zq_baileys_helper~"
+8 verbose logfile logs-max:10 dir:/data/data/com.termux/files/home/.npm/_logs/2026-11-02T18_35_28_594Z-
+9 verbose logfile /data/data/com.termux/files/home/.npm/_logs/2026-11-02T18_35_28_594Z-debug-0.log
+10 silly logfile start cleaning logs, removing 1 files
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:1174405120 maxSize:293601280 maxEntrySize:146800640
+13 verbose stack Error: An unknown git error occurred
+13 verbose stack     at makeError (/data/data/com.termux/files/usr/lib/node_modules/npm/node_modules/@npmcli/git/lib/make-error.js:28:13)
+13 verbose stack     at /data/data/com.termux/files/usr/lib/node_modules/npm/node_modules/@npmcli/git/lib/spawn.js:37:26
+13 verbose stack     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+13 verbose stack     at async RetryOperation.<anonymous> (/data/data/com.termux/files/usr/lib/node_modules/npm/node_modules/@gar/promise-retry/lib/index.js:46:24)
+14 error code 128
+15 error An unknown git error occurred
+16 error command git --no-replace-objects ls-remote ssh://git@github.com/zqdevelopers/zq_baileys_helper~.git
+17 error remote: Repository not found.
+17 error fatal: repository 'https://github.com/zqdevelopers/zq_baileys_helper~.git/' not found
+18 silly unfinished npm timer reify 1793644529290
+19 silly unfinished npm timer reify:loadTrees 1793644529291
+20 silly unfinished npm timer idealTree:userRequests 1793644529608
+21 verbose cwd /data/data/com.termux/files/home
+22 verbose os Linux 6.1.138-android14-11-g0c3d559bcd85-ab14529422
+23 verbose node v24.17.0
+24 verbose npm  v11.17.0
+25 verbose exit 128
+26 verbose code 128
+27 error A complete log of this run can be found in: /data/data/com.termux/files/home/.npm/_logs/2026-11-02T18_35_28_594Z-debug-0.log

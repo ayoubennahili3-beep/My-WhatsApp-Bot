@@ -1,0 +1,2536 @@
+// ==================== [ LOCK FILE - منع التشغيل المزدوج ] ====================
+const __LOCK_PATH = require('path').join(require('os').homedir(), '.toji-bot.lock');
+(function() {
+    try {
+        if (require('fs').existsSync(__LOCK_PATH)) {
+            const __oldPid = parseInt(require('fs').readFileSync(__LOCK_PATH, 'utf8').trim(), 10);
+            if (__oldPid && __oldPid !== process.pid) {
+                try {
+                    process.kill(__oldPid, 0);
+                    console.log('WARNING: Bot already running (PID: ' + __oldPid + '). Exiting.');
+                    process.exit(0);
+                } catch (e) {}
+            }
+        }
+        require('fs').writeFileSync(__LOCK_PATH, String(process.pid));
+        process.on('exit', () => { try { require('fs').unlinkSync(__LOCK_PATH); } catch (_) {} });
+        process.on('SIGINT', () => { try { require('fs').unlinkSync(__LOCK_PATH); } catch (_) {} process.exit(0); });
+        process.on('SIGTERM', () => { try { require('fs').unlinkSync(__LOCK_PATH); } catch (_) {} process.exit(0); });
+    } catch (e) {
+        console.log('WARNING: lock file setup failed:', e.message);
+    }
+})();
+// =====================================================================
+
+const handleImagine = require('./commands/imagine.js');
+const handleVoiceCmd = require('./voice.js');
+const path = require('path');
+
+// --- CACHE OPTIMIZATION SYSTEM ---
+const __memoryCache = new Map();
+function getCachedJson(filePath) {
+    if (!__memoryCache.has(filePath)) {
+        try {
+            if (fs.existsSync(filePath)) {
+                __memoryCache.set(filePath, JSON.parse(fs.readFileSync(filePath, 'utf8')));
+            } else {
+                return null;
+            }
+        } catch (e) {
+            console.error('Cache read error:', e);
+            return null;
+        }
+    }
+    return __memoryCache.get(filePath);
+}
+function setCachedJson(filePath, data) {
+    __memoryCache.set(filePath, data);
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
+    } catch (e) {
+        console.error('Cache write error:', e);
+    }
+}
+
+function getCachedFile(filePath) {
+    const started = process.hrtime.bigint();
+    const key = 'file:' + filePath;
+    const cached = __memoryCache.has(key);
+    if (!cached) {
+        try {
+            if (!fs.existsSync(filePath)) return null;
+            __memoryCache.set(key, fs.readFileSync(filePath));
+        } catch (e) {
+            console.error('Cache file read error:', e.message);
+            return null;
+        }
+    }
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+    console.log('[IMAGE_PREP_TIME]', filePath, elapsed.toFixed(2) + 'ms', cached ? 'CACHE' : 'FILE_READ');
+    return __memoryCache.get(key);
+}
+
+// ---------------------------------
+
+const { default: makeWASocket, useMultiFileAuthState, getContentType, downloadMediaMessage, extractMessageContent } = require('@whiskeysockets/baileys');
+const readline = require('readline');
+const pino = require('pino');
+const fs = require('fs');
+const KICKALL_PENDING = new Map();
+const VIDEO_PENDING = new Map();
+const VIDEO_DOWNLOADING = new Set();
+const VIDEO_SEEN_MESSAGES = new Map();
+// CHANGE_OWNER_NAME_FEATURE
+const OWNER_NAME_FILE = path.join(process.env.HOME || __dirname, 'bot-owner-name.json');
+const CHANGE_NAME_PENDING = new Map();
+const OWNER_NAME_MAP = {
+  'أيوب': 'AYOUB', 'ayoub': 'أيوب', 'ayo ub': 'أيوب', 'ahoub': 'أيوب',
+  '𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐': '𝐀𝐘𝐎𝐔𝐁', '𝐀𝐘𝐎𝐔𝐁': '𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐',
+  'أمين': 'AMIN', 'amin': 'أمين',
+  'محمد': 'MOHAMMED', 'mohammed': 'محمد', 'mohamed': 'محمد',
+  'يوسف': 'YOUSSEF', 'youssef': 'يوسف', 'youcef': 'يوسف',
+  'عمر': 'OMAR', 'omar': 'عمر',
+  'علي': 'ALI', 'ali': 'علي',
+  'حمزة': 'HAMZA', 'hamza': 'حمزة',
+  'بلال': 'BILAL', 'bilal': 'بلال',
+  'عثمان': 'OTHMAN', 'othman': 'عثمان',
+  'أسامة': 'OUSSAMA', 'اسامة': 'OUSSAMA', 'oussama': 'أسامة',
+  'ياسين': 'YASSINE', 'yassine': 'ياسين'
+};
+let ownerNameConfig = { arabic: '𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐', latin: '𝐀𝐘𝐎𝐔𝐁' };
+
+try {
+  if (fs.existsSync(OWNER_NAME_FILE)) {
+    const saved = JSON.parse(fs.readFileSync(OWNER_NAME_FILE, 'utf8'));
+    if (saved && typeof saved.arabic === 'string' && typeof saved.latin === 'string') {
+      ownerNameConfig = saved;
+    }
+  }
+} catch (e) {
+  console.error('تعذر قراءة إعداد اسم المالك:', e.message);
+}
+
+function transliterateArabicName(name) {
+  const letters = {
+    'ا':'a','أ':'a','إ':'i','آ':'aa','ب':'b','ت':'t','ث':'th','ج':'j',
+    'ح':'h','خ':'kh','د':'d','ذ':'dh','ر':'r','ز':'z','س':'s','ش':'sh',
+    'ص':'s','ض':'d','ط':'t','ظ':'z','ع':'a','غ':'gh','ف':'f','ق':'q',
+    'ك':'k','ل':'l','م':'m','ن':'n','ه':'h','ة':'a','و':'ou','ي':'y',
+    'ى':'a','ء':'','ئ':'y','ؤ':'w','پ':'p','ڤ':'v','گ':'g'
+  };
+  return [...name].map(ch => letters[ch] || (/[\u064B-\u065F\u0670ـ]/u.test(ch) ? '' : ch))
+    .join('').replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+function setOwnerName(input) {
+  const name = input.trim().replace(/\s+/g, ' ');
+  const key = name.toLocaleLowerCase();
+  const isArabic = /[\u0600-\u06FF]/u.test(name);
+  let arabic, latin;
+
+  if (isArabic) {
+    arabic = name;
+    latin = OWNER_NAME_MAP[name] || transliterateArabicName(name);
+  } else {
+    latin = name.toUpperCase();
+    arabic = OWNER_NAME_MAP[key] || name;
+  }
+
+  const aliases = [...new Set([
+    ...(Array.isArray(ownerNameConfig.aliases) ? ownerNameConfig.aliases : []),
+    ownerNameConfig.arabic,
+    ownerNameConfig.latin
+  ].filter(Boolean))];
+
+  ownerNameConfig = { arabic, latin, aliases };
+  fs.writeFileSync(OWNER_NAME_FILE, JSON.stringify(ownerNameConfig, null, 2), 'utf8');
+  return ownerNameConfig;
+}
+
+function replaceOwnerText(value) {
+  if (typeof value !== 'string') return value;
+
+  const arabic = ownerNameConfig.arabic;
+  const latin = ownerNameConfig.latin;
+  const latinTitle = latin.charAt(0).toUpperCase() + latin.slice(1).toLowerCase();
+
+  function normalizeName(str) {
+    return String(str).normalize('NFKD')
+      .replace(/[\u0640\u064B-\u065F\u0670]/gu, '')
+      .replace(/\p{M}/gu, '')
+      .replace(/[أإآٱ]/gu, 'ا')
+      .replace(/ى/gu, 'ي')
+      .toLowerCase();
+  }
+
+  const knownNames = new Set([
+    '𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐', 'ayoub',
+    ...(Array.isArray(ownerNameConfig.aliases) ? ownerNameConfig.aliases : []),
+    arabic,
+    latin
+  ].map(normalizeName));
+
+  // حماية أسماء الأوامر الثابتة من تغيير اسم المالك
+  const protectedParts = [];
+  let safeValue = value.replace(/\bthe prince ayoub\b/giu, match => {
+    protectedParts.push(match);
+    return '\uE000' + (protectedParts.length - 1) + '\uE001';
+  });
+
+  safeValue = safeValue.replace(/[\p{L}\p{M}\u0640]+/gu, token => {
+    if (!knownNames.has(normalizeName(token))) return token;
+    return /[\u0600-\u06FF]/u.test(token) ? arabic : latinTitle;
+  });
+
+  return safeValue.replace(/\uE000(\d+)\uE001/gu, (_, index) => protectedParts[Number(index)]);
+}
+function customizeOutgoingContent(content) {
+  if (!content || typeof content !== 'object') return content;
+  const result = { ...content };
+
+  const isTwoPrincesText = (value) =>
+    typeof value === 'string' &&
+    (
+      value.includes('ذُڪِـرَ الـذَّڪَـاءُ') ||
+      value.includes('عِـنْـدَمَـا يَـجْـتَـمِـعُ')
+    );
+
+  if (typeof result.text === 'string' && !isTwoPrincesText(result.text)) {
+    result.text = replaceOwnerText(result.text);
+  }
+
+  if (typeof result.caption === 'string' && !isTwoPrincesText(result.caption)) {
+    result.caption = replaceOwnerText(result.caption);
+  }
+
+  return result;
+}
+// END CHANGE_OWNER_NAME_FEATURE
+const yts = require('yt-search');
+const sharp = require('sharp');
+const MODE_FILE = path.join(__dirname, 'bot-mode-friend.json');
+let botMode = 'public';
+try {
+    if (fs.existsSync(MODE_FILE)) {
+        const savedMode = JSON.parse(fs.readFileSync(MODE_FILE, 'utf8')).mode;
+        if (savedMode === 'public' || savedMode === 'private') botMode = savedMode;
+    }
+} catch (e) {
+    console.error('تعذر قراءة وضعية البوت المحفوظة:', e.message);
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+
+const TEXT_MENU = `༺𖤍༻ *𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐*  👑
+
+*لَسْتُ مِمَّنْ يَطْلُبُونَ مَكَانًا فِي صُفُوفِ العَظَمَة فَقَدْ خُلِقْتُ لِأَصْنَعَ لِنَفْسِي مَقَامًا لا تَبْلُغُهُ الخُطَى...*❄️
+
+*لا أَرْفَعُ صَوْتِي لِيُسْمَعَ اسْمِي وَلا أَسْعَى لِإِثْبَاتِ قِيمَتِي فَالهَيْبَةُ لا تَسْتَجْدِي النَّظَر وَالمُلْكُ لا يُمْنَحُ لِمَنْ يَطْلُبُه*
+*أَمْلِكُ قَرَارِي أَحْكُمُ خُطَايَ وَأَتْرُكُ لِلزَّمَنِ مَهَمَّةَ الكَشْفِ عَمَّنْ أَكُون. فَلَيْسَ كُلُّ مَنْ جَلَسَ عَلَى العَرْشِ مَلِكًا، وَلَيْسَ كُلُّ مَلِكٍ يَحْتَاجُ إِلَى عَرْش...*💐
+
+『 *𝐌𝐘 𝐏𝐑𝐄𝐒𝐄𝐍𝐂𝐄 𝐈𝐒 𝐌𝐘 𝐂𝐑𝐎𝐖𝐍* 』 𖤍
+
+༺━━━━━━━━━━━━༻
+
+🌹 *𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 | 𝐊𝐈𝐍𝐆* 🌻`;
+
+const TEXT_TEST1 = `𓆩 𝑰 𝒂𝒎 𝑨𝒚𝒐𝒖𝒃 , 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒎𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒆𝒗𝒆𝒓𝒚𝒐𝒏𝒆, 𝒂𝒏𝒅 𝒘𝒉𝒂𝒕 𝒊𝒔 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒆𝒗𝒆𝒓𝒚𝒐𝒏𝒆 𝒊𝒔 𝒏𝒐𝒕 𝒂𝒗𝒂𝒊𝒍𝒂𝒃𝒍𝒆 𝒕𝒐 𝒎𝒆, 𝒂𝒏𝒅 𝒂 𝒎𝒂𝒏 𝒏𝒆𝒗𝒆𝒓 𝒓𝒆𝒗𝒆𝒂𝒍𝒔 𝒉𝒊𝒔 𝒘𝒆𝒂𝒌𝒏𝒆𝒔𝒔 𝒃𝒆𝒇𝒐𝒓𝒆 𝒐𝒕𝒉𝒆𝒓𝒔. 𓆩🌹𓆪`;
+
+const TEXT_TEST2 = `*༺ أَلَـا مَـوْتٌ يُـبَـاعُ فَـأَشْـتَـرِيـهِ ، فَـهَـذَا الـعَـيْـشُ لَا خَـيْـرَ فِـيـهِ ، أَلَـا مَـوْتٌ ذُو طَـعْـمٍ يَـأْتِـي ، يُـخَـلِّـصُـنِـي مِـنَ الـعَـيْـشِ الـكَـرِيـهِ… ༻ 🌹*`;
+
+const TEXT_TEST3 = `𓆩 𝑾𝒆 𝒂𝒓𝒆 𝒂𝒏 𝒊𝒅𝒆𝒂, 𝒂𝒏𝒅 𝒊𝒅𝒆𝒂𝒔 𝒏𝒆𝒗𝒆𝒓 𝒅𝒊𝒆 , 𝒆𝒗𝒆𝒏 𝒊𝒇 𝒕𝒉𝒆𝒊𝒓 𝒄𝒓𝒆𝒂𝒕𝒐𝒓 𝒅𝒊𝒆𝒔. ༺ 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ༻ 𓆩🌹𓆪`;
+
+const TEXT_TEST4 = `*༺ وَبَـقِـيَ 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 وَحْـدَهُ ، سَـقَـطَ يَـوْمًـا فَـنَـهَـضَ بِـعَـزِيـمَـةٍ لَا تَـلِـيـنُ ، وَحَـارَبَ الـدَّهْـرَ مُـنْـفَـرِدًا ، يُـخْـفِـي هُـمُـومَـهُ خَـلْـفَ صَـمْـتِـهِ وَلَا يَـشْـكُـو لِـأَحَـدٍ وَجَـعَـهُ ، فَـصَـنَـعَ مِـنْ انْـكِـسَـارِهِ قُـوَّةً وَمِـنْ وَحْـدَتِـهِ مَـجْـدًا لَا يَـقْـهَـرُهُ الـزَّمَـنُ… ༻ 🌹*`;
+
+let __cachedCaption = null;
+let __cachedMenu = null;
+let __cachedMenuHash = '';
+const radarGroups = new Map(); // { chat: { mode: 'radar'|'submit'|'off', suspects: Set } }
+let realChannelMsgId = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 60000;
+
+const sendTojiText = async (sock, jid, text) => {
+    try {
+        const { sendInteractiveMessage } = require('zqbaileys_helper');
+        await sendInteractiveMessage(sock, jid, {
+            title: 'TOJI FUSHIGURO', // هنا رجعنا العنوان
+            text: text,
+            footer: '', 
+            interactiveButtons: [{
+                name: 'cta_url',
+                buttonParamsJson: JSON.stringify({
+                    display_text: 'عرض القناة',
+                    url: 'https://whatsapp.com/channel/0029VbDb2LaJUM2T99gn2D1i',
+                    merchant_url: 'https://whatsapp.com/channel/0029VbDb2LaJUM2T99gn2D1i'
+                })
+            }]
+        });
+    } catch (err) {
+        console.error('[TOJI TEXT BUTTON ERROR]', err.message);
+        await sock.sendMessage(jid, { text: text });
+    }
+};
+
+async function start() {
+    const { state, saveCreds } = await useMultiFileAuthState(require('path').join(__dirname, 'session-ayoub-friend'));
+    
+    const sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        syncFullHistory: false
+    });
+
+
+    // تطبيق الاسم المختار على الرسائل والتعليقات واسم المجموعة
+    const originalSendMessage = sock.sendMessage.bind(sock);
+    // ميزة تغيير الاسم محفوظة، لكنها معطلة مؤقتاً
+    sock.sendMessage = originalSendMessage;
+
+    // SPEED_STATS_MONITOR
+    const speedPending = new Map();
+    const speedStatsFile = path.join(__dirname, 'bot-speed-stats.json');
+
+    sock.sendMessage = async (jid, content, options) => {
+        const imageStarted = content?.image ? process.hrtime.bigint() : null;
+        
+        
+
+        
+        // --- REAL CHANNEL FORWARD UI ---
+        try {
+            if (content && (content.text || content.caption) && !content.image && !content.video && !content.audio) {
+                if (global.realChannelMsgId) {
+                    content.contextInfo = {
+                        ...(content.contextInfo || {}),
+                        forwardingScore: 999,
+                        isForwarded: true,
+                        forwardedNewsletterMessageInfo: {
+                            newsletterJid: '0029VbDb2LaJUM2T99gn2D1i@newsletter',
+                            newsletterName: 'SUPPORT TOJI BOT ⚱️',
+                            serverMessageId: global.realChannelMsgId, // كنستعملو الـ ID الحقيقي اللي تلقط
+                            contentType: 1
+                        }
+                    };
+                }
+            }
+        } catch (err) {
+            console.error('Channel UI error:', err.message);
+        }
+        // ---------------------------------
+        
+        const result = await originalSendMessage(jid, content, options);
+        if (imageStarted) {
+            const imageElapsed = Number(process.hrtime.bigint() - imageStarted) / 1e6;
+            console.log('[IMAGE_SEND_TIME]', imageElapsed.toFixed(2) + 'ms');
+        }
+        try {
+            const quotedId = options?.quoted?.key?.id;
+            const pending = quotedId ? speedPending.get(quotedId) : null;
+            if (pending) {
+                speedPending.delete(quotedId);
+                const elapsed = Number(process.hrtime.bigint() - pending.startedAt) / 1e6;
+                let data = { commands: {} };
+                try {
+                    if (fs.existsSync(speedStatsFile)) {
+                        data = JSON.parse(fs.readFileSync(speedStatsFile, 'utf8'));
+                    }
+                } catch (_) {}
+                if (!data.commands) data.commands = {};
+                const item = data.commands[pending.command] || {
+                    count: 0, totalMs: 0, maxMs: 0, lastMs: 0
+                };
+                item.count++;
+                item.totalMs += elapsed;
+                item.maxMs = Math.max(item.maxMs, elapsed);
+                item.lastMs = elapsed;
+                item.avgMs = item.totalMs / item.count;
+                item.lastAt = new Date().toISOString();
+                data.commands[pending.command] = item;
+                const tempFile = speedStatsFile + '.tmp';
+                fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+                fs.renameSync(tempFile, speedStatsFile);
+            }
+        } catch (err) {
+            console.error('SPEED STATS ERROR:', err.message);
+        }
+        return result;
+    };
+    // END SPEED_STATS_MONITOR
+
+
+    if (typeof sock.groupUpdateSubject === 'function') {
+        sock.groupUpdateSubject = sock.groupUpdateSubject.bind(sock);
+    }
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+
+        if (connection === 'close') {
+            console.log('🔄 انقطع الاتصال.');
+            console.log('سبب الانقطاع:', lastDisconnect?.error?.message || 'غير معروف');
+            console.log('رمز الانقطاع:', statusCode || 'غير متوفر');
+
+            if (statusCode === 440) {
+                reconnectAttempts++;
+                const delay440 = Math.min(30000 * reconnectAttempts, MAX_RECONNECT_DELAY);
+                console.log('440 conflict, attempt ' + reconnectAttempts + ', retry in ' + (delay440/1000) + 's');
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null;
+                    start().catch(err => console.log('reconnect error:', err.message));
+                }, delay440);
+                return;
+            }
+
+            if (statusCode === 401) {
+                console.log('⛔ انتهت صلاحية الجلسة أو تم تسجيل الخروج. إيقاف إعادة الاتصال وطلب ربط جديد.');
+                (async () => {
+                    const fs = require('fs');
+                    const path = require('path');
+                    const sessionDir = path.join(__dirname, 'session-ayoub-friend');
+                    const backupDir = sessionDir + '-rejected-' + Date.now();
+
+                    try {
+                        if (fs.existsSync(sessionDir)) {
+                            fs.renameSync(sessionDir, backupDir);
+                            console.log('📦 حفظنا الجلسة القديمة في:', backupDir);
+                        }
+                        fs.mkdirSync(sessionDir, { recursive: true });
+                        console.log('📲 ستحتاج إلى إدخال رقم الهاتف مع رمز الدولة للحصول على رمز اقتران جديد.');
+                        await start();
+                    } catch (err) {
+                        console.log('❌ تعذر بدء جلسة جديدة:', err.message);
+                        console.log('الجلسة القديمة محفوظة إن كان نقلها قد نجح.');
+                    }
+                })();
+                return;
+            }
+
+            if (!reconnectTimer) {
+                reconnectAttempts++;
+                const backoff = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+                console.log('reconnect attempt ' + reconnectAttempts + ' in ' + (backoff/1000) + 's');
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null;
+                    start().catch(err => console.log('reconnect error:', err.message));
+                }, backoff);
+            }
+        } else if (connection === 'open') {
+            reconnectAttempts = 0;
+            console.log('✅ تم اتصال البوت بنجاح وهو جاهز الآن لاستقبال الأوامر!');
+        }
+    });
+
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = await question('📲 ادخل رقم البوت مع رمز الدولة (مثال: 212xxxxxxxxx): ');
+        const cleanNumber = phoneNumber.replace(/\D/g, '');
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(cleanNumber);
+                console.log('\n🔑 كود الربط الخاص بك هو: ' + code + '\n');
+            } catch (err) {
+                console.log('❌ خطأ أثناء طلب الكود: ', err.message);
+            }
+        }, 3000);
+    }
+
+    
+// ==================== [ محمل الأوامر المعيارية الآمن ] ====================
+if (typeof global.commandsMap === 'undefined') {
+    global.commandsMap = new Map();
+    const l_fs = require('fs');
+    const l_path = require('path');
+    const cmdDir = l_path.join(__dirname, 'commands');
+    if (l_fs.existsSync(cmdDir)) {
+        l_fs.readdirSync(cmdDir).filter(f => f.endsWith('.js')).forEach(file => {
+            try {
+                const cmdPath = l_path.join(cmdDir, file);
+                delete require.cache[require.resolve(cmdPath)];
+                const cmd = require(cmdPath);
+                if (cmd && cmd.name) {
+                    global.commandsMap.set(cmd.name, cmd.execute);
+                }
+            } catch (e) {
+                console.log('خطأ في تحميل الأمر:', file, e.message);
+            }
+        });
+    }
+}
+// =========================================================================
+
+sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        try {
+            if (type !== 'notify') {
+                console.log('[MSG DEBUG] تم تجاهل نوع الحدث:', type);
+                return;
+            }
+
+            for (const mek of messages || []) {
+                if (!mek.message) continue;
+
+                    
+
+                const debugFrom = mek.key?.remoteJid || '';
+                const debugBody = mek.message.conversation ||
+                    mek.message.extendedTextMessage?.text ||
+                    mek.message.imageMessage?.caption ||
+                    mek.message.videoMessage?.caption || '';
+                console.log('[MSG DEBUG]', JSON.stringify({
+                    type,
+                    from: debugFrom,
+                    fromMe: !!mek.key?.fromMe,
+                    body: String(debugBody).slice(0, 100)
+                }));
+
+                // منع معالجة نفس رسالة واتساب أكثر من مرة
+                const dedupId = mek.key?.id;
+                if (dedupId) {
+                    const dedupKey = String(mek.key.remoteJid || '') + ':' + dedupId;
+                    const now = Date.now();
+                    if (VIDEO_SEEN_MESSAGES.has(dedupKey)) continue;
+                    VIDEO_SEEN_MESSAGES.set(dedupKey, now);
+
+                    if (VIDEO_SEEN_MESSAGES.size > 2000) {
+                        for (const [key, time] of VIDEO_SEEN_MESSAGES) {
+                            if (now - time > 120000) VIDEO_SEEN_MESSAGES.delete(key);
+                        }
+                    }
+                }
+
+
+                const from = mek.key.remoteJid;
+
+                    // --- RADAR & SUBMIT LOGIC ---
+                    const radarState = radarGroups.get(from);
+                    if (radarState && radarState.mode !== 'off' && from.endsWith('@g.us') && !mek.key.fromMe) {
+                        const sender = mek.key.participant || mek.key.remoteJid;
+                        const senderNumber = sender.split('@')[0];
+                        
+                        // نستخرجو النص مباشرة من الرسالة
+                        const textMsg = (mek.message.conversation || mek.message.extendedTextMessage?.text || mek.message.imageMessage?.caption || '').trim();
+
+                        if (/^[.\/!]/.test(textMsg) && textMsg.length > 1) {
+                            
+                            // 1. وضع الرصد: تنبيه + تسجيل فـ اللائحة
+                            if (radarState.mode === 'radar') {
+                                // تسجيل المشتبه فيه
+                                if (!radarState.suspects) radarState.suspects = new Set();
+                                if (!radarState.suspects.has(sender)) {
+                                    radarState.suspects.add(sender);
+                                    radarGroups.set(from, radarState);
+                                }
+                                
+                                await sock.sendMessage(from, {
+                                    text: `📡 *تنبيه رصد*\n\n⚠️ العضو: @${senderNumber}\n🤖 يبدو أنه رابط بوت.\n> للهجوم: .اخضع\n> للإلغاء: .الغاء`,
+                                    mentions: [sender]
+                                }, { quoted: mek }).catch(() => {});
+                            }
+                            
+                            // 2. وضع الهجوم: طرد فوري + رسالة
+                            else if (radarState.mode === 'submit') {
+                                try {
+                                    await sock.groupParticipantsUpdate(from, [sender], 'remove');
+                                    await sock.sendMessage(from, {
+                                        text: `✅ *تم طرد صاحب بوت مشتبه به.*`,
+                                        mentions: [sender]
+                                    }, { quoted: mek }).catch(() => {});
+                                } catch (err) {
+                                    console.error(`[RADAR KICK ERROR] ❌ فشل الطرد:`, err.message);
+                                    await sock.sendMessage(from, { 
+                                        text: `❌ *فشل الطرد (ممكن يكون أدمن).*` 
+                                    }, { quoted: mek }).catch(() => {});
+                                }
+                            }
+                        }
+                    }
+                    // --- END RADAR & SUBMIT LOGIC ---
+
+                if (!from) continue;
+
+                if (from.endsWith('@g.us') && !mek.key.fromMe) {
+                    console.log('[GROUP TRACE]', JSON.stringify({
+                        group: from,
+                        participant: mek.key.participant || null,
+                        participantAlt: mek.key.participantAlt || null,
+                        messageId: mek.key.id
+                    }));
+                }
+
+                const msg = mek.message;
+                const body = (
+                    msg.conversation ||
+                    msg.extendedTextMessage?.text ||
+                    msg.imageMessage?.caption ||
+                    msg.videoMessage?.caption ||
+                    msg.documentMessage?.caption ||
+                    ''
+                ).trim();
+
+                const senderJid = mek.key.fromMe
+                    ? sock.user?.id
+                    : (mek.key.participant || mek.key.remoteJid);
+                const senderNumber = (senderJid || '').split('@')[0].split(':')[0];
+                const developerNumbers = [
+    '212704777168'
+];
+
+const isDeveloper = developerNumbers.includes(senderNumber);
+
+// حماية الوضع الخاص قبل تنفيذ أي أمر
+if (
+    botMode === 'private' &&
+    !isDeveloper &&
+    !mek.key.fromMe &&
+    !(
+        from.endsWith('@g.us') &&
+        (() => {
+            try {
+                const statePath = path.join(__dirname, 'dm-blocks-friend.json');
+                const saved = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                return Object.prototype.hasOwnProperty.call(saved, from);
+            } catch (_) {
+                return false;
+            }
+        })()
+    )
+) continue;
+
+
+                const senderKey = senderJid || from;
+if (/^[.!]?\s*تغير\s*$/i.test(body)) {
+    console.log('[تغيير الاسم] from =', from, '| senderJid =', senderJid);
+    const isPrivateChat = !from.endsWith('@g.us') && !from.endsWith('@broadcast');
+    if (!isPrivateChat && !isDeveloper) {
+        await sock.sendMessage(from, { text: '⛔ استخدم أمر تغيير الاسم في الخاص مع البوت.' }, { quoted: mek });
+        continue;
+    }
+    CHANGE_NAME_PENDING.set(senderKey, from);
+    await sock.sendMessage(from, {
+        text: '✍️ أرسل الاسم الجديد فقط، بالعربية أو باللاتينية.\\nمثال: أيوب أو AYOUB\\nغادي نحفظ الاسم ونستعمل الصيغتين قدر الإمكان.'
+    }, { quoted: mek });
+    continue;
+}
+
+if (CHANGE_NAME_PENDING.has(senderKey)) {
+    if (/^[.!]/.test(body)) {
+        CHANGE_NAME_PENDING.delete(senderKey);
+    } else if (body && body.length <= 50) {
+        try {
+            const chosen = setOwnerName(body);
+            CHANGE_NAME_PENDING.delete(senderKey);
+            await sock.sendMessage(from, {
+                text: '✅ تبدل اسم المالك وتحفظ بنجاح.\\n👑 العربية: ' + chosen.arabic +
+                      '\\n🌐 اللاتينية: ' + chosen.latin +
+                      '\\nالتغيير محفوظ حتى بعد إعادة تشغيل البوت.'
+            }, { quoted: mek });
+        } catch (e) {
+            await sock.sendMessage(from, { text: '❌ ما قدرتش نحفظ الاسم: ' + e.message }, { quoted: mek });
+        }
+        continue;
+    }
+}
+
+                
+                const match = body.match(/^[.!]?\s*(?:تست|test)\s*([1-5١-٥])\s*$/i);
+                const command = body.replace(/^[.!]/, '').trim().toLowerCase();
+
+                // --- AYOUB_JALB_VIDEO ---
+                // --- TEST: زر القناة باستعمال zqbaileys_helper ---
+                if (command === 'زر') {
+                    try {
+                        const { sendInteractiveMessage } =
+                            require('zqbaileys_helper');
+
+                        const channelUrl =
+                            'https://whatsapp.com/channel/0029VbDb2LaJUM2T99gn2D1i';
+
+                        await sendInteractiveMessage(sock, from, {
+                            title: '𝑻𝑶𝑱𝑰 𝑭𝑼𝑺𝑯𝑰𝑮𝑼𝑹𝑶',
+                            text: 'تابع قناة TOJI FUSHIGURO الرسمية ⚱️',
+                            footer: 'SUPPORT TOJI BOT',
+                            interactiveButtons: [{
+                                name: 'cta_url',
+                                buttonParamsJson: JSON.stringify({
+                                    display_text: 'عرض القناة',
+                                    url: channelUrl,
+                                    merchant_url: channelUrl
+                                })
+                            }]
+                        });
+
+                        console.log('[زر TEST] تم إرسال طلب الزر عبر helper');
+                    } catch (err) {
+                        console.error('[زر TEST ERROR]', err?.stack || err);
+                    }
+
+                    continue;
+                }
+                // --- END TEST BUTTON ---
+
+                if (command === 'ارسل') {
+                    if (VIDEO_DOWNLOADING.has(senderKey) || VIDEO_PENDING.has(senderKey)) {
+                        continue;
+                    }
+                    VIDEO_PENDING.set(senderKey, from);
+                    await sock.sendMessage(from, {
+                        text: '▰▰ *أَدْخِــلْ رَابِــطْ* ▰▰ 🔗\nللإلغاء أرسل: .إلغاء'
+                    }, { quoted: mek });
+                    continue;
+                }
+
+                if (VIDEO_PENDING.has(senderKey)) {
+                    if (command === 'إلغاء' || command === 'الغاء') {
+                        VIDEO_PENDING.delete(senderKey);
+                        await sock.sendMessage(from, { text: '✅ تلغى طلب جلب الفيديو.' }, { quoted: mek });
+                        continue;
+                    }
+
+                    if (/^[.!]/.test(body)) {
+                        VIDEO_PENDING.delete(senderKey);
+                    } else {
+                        let videoUrl;
+                        try {
+                            videoUrl = new URL(body.trim());
+                            if (!['http:', 'https:'].includes(videoUrl.protocol) ||
+                                videoUrl.username || videoUrl.password) {
+                                throw new Error('رابط غير مسموح');
+                            }
+                        } catch (_) {
+                            await sock.sendMessage(from, {
+                                text: '▰▰ *اتَّـقِ الـلَّـه فِــي نَـفْــسِــك* ▰▰ ⚠️'
+                            }, { quoted: mek });
+                            continue;
+                        }
+
+                        VIDEO_PENDING.delete(senderKey);
+                        if (VIDEO_DOWNLOADING.has(senderKey)) continue;
+                        VIDEO_DOWNLOADING.add(senderKey);
+
+                        let videoTempDir;
+                        try {
+                            await sock.sendMessage(from, {
+                                text: '▰▰ *جـــاري الـتَّـحْـمـيـل فِـــيــدِيـــو* ▰▰ ⏳'
+                            }, { quoted: mek });
+
+                            const { execFile } = require('child_process');
+                            const os = require('os');
+
+                            videoTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ayoub-video-'));
+                            
+                            const isPornHat =
+                                videoUrl.hostname === 'pornhat.com' ||
+                                videoUrl.hostname.endsWith('.pornhat.com');
+
+                            let printedPath;
+
+                            if (isPornHat) {
+                                const outputPath = path.join(videoTempDir, 'video.mp4');
+
+                                const hlsUrlOutput = await new Promise((resolve, reject) => {
+                                    execFile('yt-dlp', [
+                                        '--js-runtimes', 'node',
+                                        '--remote-components', 'ejs:github',
+                                        '--no-playlist',
+                                        '-f', '720p',
+                                        '--get-url',
+                                        videoUrl.href
+                                    ], {
+                                        timeout: 60000,
+                                        maxBuffer: 2 * 1024 * 1024,
+                                        encoding: 'utf8'
+                                    }, (error, stdout) => {
+                                        if (error) return reject(new Error('تعذر استخراج رابط HLS'));
+                                        resolve(stdout);
+                                    });
+                                });
+
+                                const hlsUrl = hlsUrlOutput.trim()
+                                    .split(/\r?\n/)
+                                    .filter(line => /^https?:\/\//i.test(line))
+                                    .pop();
+
+                                if (!hlsUrl) throw new Error('رابط HLS غير متوفر');
+
+                                await new Promise((resolve, reject) => {
+                                    execFile('ffmpeg', [
+                                        '-hide_banner',
+                                        '-loglevel', 'error',
+                                        '-y',
+                                        '-i', hlsUrl,
+                                        '-map', 'p:2:v:0',
+                                        '-map', 'p:2:a:0',
+                                        '-c', 'copy',
+                                        '-movflags', '+faststart',
+                                        outputPath
+                                    ], {
+                                        timeout: 0,
+                                        maxBuffer: 4 * 1024 * 1024,
+                                        encoding: 'utf8'
+                                    }, (error) => {
+                                        if (error) return reject(new Error('فشل تحويل HLS إلى MP4'));
+                                        resolve();
+                                    });
+                                });
+
+                                printedPath = outputPath;
+                            } else {
+                                const outputTemplate = path.join(videoTempDir, 'video.%(ext)s');
+
+                                const args = [
+                                    '--js-runtimes', 'node',
+                                    '--remote-components', 'ejs:github',
+                                    '--no-playlist',
+                                    '--no-progress',
+                                    '--socket-timeout', '30',
+                                    '--retries', '3',
+                                    '--fragment-retries', '3',
+                                    '-f', 'bestvideo*+bestaudio/best',
+                                    '--merge-output-format', 'mp4',
+                                    '--remux-video', 'mp4',
+                                    '--no-overwrites',
+                                    '--ffmpeg-location', '/data/data/com.termux/files/usr/bin',
+                                    '-o', outputTemplate,
+                                    '--print', 'after_move:filepath',
+                                    videoUrl.href
+                                ];
+
+                                printedPath = await new Promise((resolve, reject) => {
+                                    execFile('yt-dlp', args, {
+                                        timeout: 0,
+                                        maxBuffer: 16 * 1024 * 1024,
+                                        encoding: 'utf8'
+                                    }, (error, stdout, stderr) => {
+                                        if (error) {
+                                            error.stderr = stderr;
+                                            reject(error);
+                                        } else {
+                                            resolve(stdout);
+                                        }
+                                    });
+                                });
+                            }
+
+const downloadedPath = printedPath.trim().split(/\r?\n/).filter(Boolean).pop();
+                            if (!downloadedPath) throw new Error('لم يتم العثور على مسار الفيديو');
+
+                            const resolvedVideo = path.resolve(downloadedPath);
+                            const resolvedTemp = path.resolve(videoTempDir) + path.sep;
+
+                            if (!resolvedVideo.startsWith(resolvedTemp)) {
+                                throw new Error('مسار الملف غير آمن');
+                            }
+                            if (!fs.existsSync(resolvedVideo) || !fs.statSync(resolvedVideo).isFile()) {
+                                throw new Error('ملف الفيديو غير موجود');
+                            }
+                            if (fs.statSync(resolvedVideo).size === 0) {
+                                throw new Error('ملف الفيديو فارغ');
+                            }
+
+                            if (isPornHat) {
+                                const probeOutput = await new Promise((resolve, reject) => {
+                                    execFile('ffprobe', [
+                                        '-v', 'error',
+                                        '-show_entries', 'stream=codec_type',
+                                        '-of', 'csv=p=0',
+                                        resolvedVideo
+                                    ], {
+                                        timeout: 30000,
+                                        maxBuffer: 1024 * 1024,
+                                        encoding: 'utf8'
+                                    }, (error, stdout) => {
+                                        if (error) return reject(new Error('فشل فحص MP4 الناتج'));
+                                        resolve(stdout);
+                                    });
+                                });
+
+                                const streams = probeOutput.trim().split(/\\r?\\n/);
+                                if (!streams.includes('video') || !streams.includes('audio')) {
+                                    throw new Error('الفيديو الناتج لا يحتوي على الصورة والصوت');
+                                }
+                            }
+
+                            // فحص MP4 مفعل لـ PornHat فقط
+
+
+                            await sock.sendMessage(from, {
+                                video: fs.readFileSync(resolvedVideo),
+                                mimetype: 'video/mp4',
+                                caption: '🎬 تم جلب الفيديو بنجاح\n> 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐'
+                            }, { quoted: mek });
+
+                        } catch (e) {
+                            console.error('[AYOUB_VIDEO_ERROR]', e.stderr || e.message || e);
+                            await sock.sendMessage(from, {
+                                text: '▰▰ *اتَّـقِ الـلَّـه فِــي نَـفْــسِــك* ▰▰ ⚠️'
+                            }, { quoted: mek });
+                        } finally {
+                            VIDEO_DOWNLOADING.delete(senderKey);
+                            if (videoTempDir) {
+                                try {
+                                    fs.rmSync(videoTempDir, { recursive: true, force: true });
+                                } catch (_) {}
+                            }
+                        }
+                        continue;
+                    }
+                }
+                // --- END AYOUB_JALB_VIDEO ---
+
+
+                // --- DM / OF: حظر رسائل شخص واحد داخل المجموعة ---
+                const dmStatePath = require('path').join(__dirname, 'dm-blocks-friend.json');
+                let dmState = {};
+                try {
+                    dmState = JSON.parse(fs.readFileSync(dmStatePath, 'utf8'));
+                } catch (_) {
+                    dmState = {};
+                }
+
+                const isGroupForDm = from.endsWith('@g.us');
+
+                // تفعيل الحظر بالرد على رسالة الشخص
+                if (command === 'dm') {
+                    if (!isDeveloper && !mek.key.fromMe) continue;
+
+                    if (!isGroupForDm) {
+                        await sock.sendMessage(from, {
+                            text: '❌ الأمر .dm مخصص للمجموعات.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    const quoted = mek.message?.extendedTextMessage?.contextInfo;
+                    const targetJid = quoted?.participant || quoted?.participantAlt;
+                    const normalizeDmJid = jid =>
+                        (jid || '').replace(/:\d+(?=@)/, '');
+
+                    if (
+                        !quoted?.stanzaId ||
+                        !targetJid ||
+                        normalizeDmJid(targetJid) === normalizeDmJid(sock.user?.id)
+                    ) {
+                        await sock.sendMessage(from, {
+                            text: '❌ ردّ على رسالة الشخص المستهدف ثم اكتب .dm'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    dmState[from] = {
+                        jid: normalizeDmJid(targetJid),
+                        updatedAt: Date.now()
+                    };
+
+                    fs.writeFileSync(dmStatePath, JSON.stringify(dmState, null, 2));
+                    await sock.sendMessage(from, {
+                        text: '▰▰ *إلـى هـدْرَتـي نـعـطـيـك 200 دُرْهـم* ▰▰ 😂'
+                    }, { quoted: mek });
+                    continue;
+                }
+
+                // إلغاء الحظر بكتابة .of وحده في المجموعة
+                if (command === 'of') {
+                    if (!isDeveloper && !mek.key.fromMe) continue;
+
+                    if (!isGroupForDm) {
+                        await sock.sendMessage(from, {
+                            text: '❌ الأمر .of مخصص للمجموعات.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    if (dmState[from]?.jid) {
+                        delete dmState[from];
+                        fs.writeFileSync(dmStatePath, JSON.stringify(dmState, null, 2));
+                        await sock.sendMessage(from, {
+                            text: '▰▰ *جــاك عـفـو مَـلَـكـي* ▰▰ 👑'
+                        }, { quoted: mek });
+                    } else {
+                        await sock.sendMessage(from, {
+                            text: 'ℹ️ ما كاين حتى شخص محظور حالياً بهذا الأمر في هذه المجموعة.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                // حذف أي رسالة جديدة من الشخص المستهدف، مهما كان نوعها
+                const normalizeDmJid = jid =>
+                    (jid || '').replace(/:\d+(?=@)/, '');
+                const incomingParticipants = [
+                    mek.key.participant,
+                    mek.key.participantAlt
+                ].filter(Boolean);
+                if (isGroupForDm && dmState[from]?.jid && !mek.key.fromMe) {
+                    console.log('[DM DEBUG]', JSON.stringify({
+                        group: from,
+                        savedTarget: dmState[from].jid,
+                        participant: mek.key.participant || null,
+                        participantAlt: mek.key.participantAlt || null,
+                        messageId: mek.key.id
+                    }));
+                }
+
+                if (
+                    isGroupForDm &&
+                    !mek.key.fromMe &&
+                    dmState[from]?.jid &&
+                    incomingParticipants.some(
+                        jid => normalizeDmJid(jid) === dmState[from].jid
+                    )
+                ) {
+                    const deleteParticipant =
+                    mek.key.participant || mek.key.participantAlt;
+
+                const deleteJob = {
+                    group: from,
+                    id: mek.key.id,
+                    participant: deleteParticipant
+                };
+
+                // طابور مشترك لتجنب إرسال طلبات الحذف دفعة واحدة
+                globalThis.__friendDmDeleteQueue =
+                    (globalThis.__friendDmDeleteQueue || Promise.resolve())
+                    .then(async () => {
+                        const wait = ms =>
+                            new Promise(resolve => setTimeout(resolve, ms));
+
+                        // إرسال الطلب مباشرة عبر الطابور المتسلسل
+
+                        for (let attempt = 1; attempt <= 3; attempt++) {
+                            try {
+                                await sock.sendMessage(deleteJob.group, {
+                                    delete: {
+                                        remoteJid: deleteJob.group,
+                                        fromMe: false,
+                                        id: deleteJob.id,
+                                        participant: deleteJob.participant
+                                    }
+                                });
+
+                                console.log(
+                                    '[DM] تم إرسال طلب الحذف:',
+                                    deleteJob.id
+                                );
+                                return;
+                            } catch (err) {
+                                const msg = String(err?.message || err);
+                                const limited =
+                                    /rate-overlimit|429|too many|rate.?limit/i.test(msg);
+
+                                if (limited && attempt < 3) {
+                                    const delay = 2000 * attempt;
+                                    console.warn(
+                                        '[DM] تأخير بسبب حدود واتساب:',
+                                        delay, 'ms'
+                                    );
+                                    await wait(delay);
+                                    continue;
+                                }
+
+                                console.error(
+                                    '[DM] فشل الحذف:',
+                                    deleteJob.id,
+                                    msg
+                                );
+                                return;
+                            }
+                        }
+                    })
+                    .catch(err => {
+                        console.error('[DM] خطأ في طابور الحذف:', err);
+                    });
+
+                continue;
+            }
+                // --- نهاية DM / OF ---
+
+                if (command === 'menu') {
+                    const menuImagePath = '/storage/emulated/0/New Folder kingo 7/kingo.jpg';
+                    if (!fs.existsSync(menuImagePath)) {
+                        await sock.sendMessage(from, {
+                            text: '❌ صورة القائمة غير موجودة في المسار المحدد.'
+                        }, { quoted: mek });
+                    } else {
+                        await sock.sendMessage(from, {
+                            image: fs.readFileSync(menuImagePath),
+                            caption: TEXT_MENU
+                        }, { quoted: mek });
+
+                        const menuAudioPath = '/storage/emulated/0/New Folder kingo 7/yorym.mp3';
+                        if (fs.existsSync(menuAudioPath)) {
+                            await sock.sendMessage(from, {
+                                audio: fs.readFileSync(menuAudioPath),
+                                mimetype: 'audio/mpeg',
+                                fileName: 'yorym.mp3',
+                                ptt: false
+                            }, { quoted: mek });
+                        } else {
+                            await sock.sendMessage(from, {
+                                text: '⚠️ صورة القائمة أُرسلت، لكن التسجيل yorym.mp3 غير موجود.'
+                            }, { quoted: mek });
+                        }
+                    }
+                    continue;
+                }
+
+                if (await handleImagine(mek, body, from, sock)) continue;
+                if (await handleVoiceCmd(mek, body, from, sock)) continue;
+                if (/^[.!]/.test(body) && command && command !== 'speed' && mek.key?.id) {
+                    speedPending.set(mek.key.id, {
+                        command,
+                        startedAt: process.hrtime.bigint()
+                    });
+                    if (speedPending.size > 500) {
+                        speedPending.delete(speedPending.keys().next().value);
+                    }
+                }
+
+
+
+    
+// --- FM COMMAND (حذف رسالة بالرد - لصاحب البوت فقط) ---
+if (command === 'fm') {
+    if (!isDeveloper && !mek.key.fromMe) {
+        continue;
+    }
+
+    const contextInfo = mek.message?.extendedTextMessage?.contextInfo || mek.message?.contextInfo;
+
+    if (!contextInfo || !contextInfo.stanzaId) {
+        await sock.sendMessage(from, { text: '❌ يجب الرد على الرسالة التي تريد مسحها.' }, { quoted: mek });
+        continue;
+    }
+
+    const isGroup = from.endsWith('@g.us');
+
+    // تحديد واش الرسالة المراد مسحها من البوت أم لا
+    const isBotMessage = contextInfo.participant ? false : (contextInfo.remoteJid === sock.user?.id || !contextInfo.participant);
+
+    // في الخاص: نسمح فقط بمسح رسائل البوت نفسه
+    if (!isGroup) {
+        // نحاول نمسح باعتبارها رسالة من البوت
+        try {
+            await sock.sendMessage(from, {
+                delete: {
+                    remoteJid: from,
+                    fromMe: true,
+                    id: contextInfo.stanzaId
+                }
+            });
+        } catch (e) {
+            await sock.sendMessage(from, { text: '⚠️ في الخاص يمكن مسح رسائل البوت فقط.\nما قدرتش نمسح هاد الرسالة.' }, { quoted: mek });
+        }
+        continue;
+    }
+
+    // في المجموعات
+    try {
+        await sock.sendMessage(from, {
+            delete: {
+                remoteJid: from,
+                fromMe: false,
+                id: contextInfo.stanzaId,
+                participant: contextInfo.participant
+            }
+        });
+    } catch (e) {
+        console.error('FM delete error:', e);
+        await sock.sendMessage(from, { text: '❌ فشل مسح الرسالة. تأكد أن البوت أدمن في المجموعة.' }, { quoted: mek });
+    }
+    continue;
+}
+// --- END FM COMMAND ---
+
+// --- VV COMMAND ---
+    if (command === 'vv') {
+        (async () => {
+            try {
+                const quoted = mek?.message?.extendedTextMessage?.contextInfo?.quotedMessage || 
+                               mek?.msg?.extendedTextMessage?.contextInfo?.quotedMessage;
+
+                if (!quoted) {
+                    await sock.sendMessage(from, { text: '❌ يرجى الرد على صورة أو فيديو بخاصية مشاهدة مرة واحدة لاستخراجها!' }, { quoted: mek });
+                    return;
+                }
+
+                const viewOnceMsg = quoted.viewOnceMessage?.message || 
+                                    quoted.viewOnceMessageV2?.message || 
+                                    quoted.viewOnceMessageV2Extension?.message ||
+                                    quoted;
+
+                const mediaMessage = viewOnceMsg.imageMessage || viewOnceMsg.videoMessage;
+
+                if (!mediaMessage) {
+                    await sock.sendMessage(from, { text: '❌ الرسالة المقتبسة لا تحتوي على وسائط مشاهدة مرة واحدة مدعومة!' }, { quoted: mek });
+                    return;
+                }
+
+                await sock.sendMessage(from, { text: '🔄 جاري استخراج الوسائط الدائمة...' }, { quoted: mek });
+
+                const mediaBuffer = await downloadMediaMessage(
+                    { message: quoted }, 
+                    'buffer', 
+                    {}, 
+                    { 
+                        logger: console,
+                        reuploadRequest: sock.updateMediaMessage 
+                    }
+                );
+
+                if (!mediaBuffer || mediaBuffer.length === 0) {
+                    await sock.sendMessage(from, { text: '❌ فشل تنزيل الوسائط.' }, { quoted: mek });
+                    return;
+                }
+
+                const mime = mediaMessage.mimetype || '';
+                const caption = mediaMessage.caption || '✅ تم الاستخراج بنجاح بواسطة .vv';
+
+                if (mime.includes('image')) {
+                    await sock.sendMessage(from, { image: mediaBuffer, caption: caption }, { quoted: mek });
+                } else if (mime.includes('video')) {
+                    await sock.sendMessage(from, { video: mediaBuffer, caption: caption, mimetype: mime }, { quoted: mek });
+                } else {
+                    await sock.sendMessage(from, { document: mediaBuffer, mimetype: mime || 'application/octet-stream', fileName: 'media.bin', caption: caption }, { quoted: mek });
+                }
+
+            } catch (err) {
+                console.error('Error in .vv command:', err);
+                await sock.sendMessage(from, { text: '❌ حدث خطأ تقني أثناء معالجة الوسائط.' }, { quoted: mek });
+            }
+        })();
+    }
+    // --- END VV COMMAND ---
+
+
+
+if (command === 'كبرياء') {
+    const videoPath = '/storage/emulated/0/New Folder kibraya2/kibray.mp4';
+    const audioPath = '/storage/emulated/0/New Folder kibraya2/morine.mp3';
+
+    try {
+        if (!fs.existsSync(videoPath) || !fs.existsSync(audioPath)) {
+            await sock.sendMessage(from, {
+                text: '❌ لم أجد ملف الفيديو أو الصوت في المسار المحدد.'
+            }, { quoted: mek });
+            continue;
+        }
+
+        await sock.sendMessage(from, {
+            text: '*༺ يُـخَـاطِـبُـنِـي الـسَّـفِـيـهُ بِـكُـلِّ قُـبْـحٍ ، فَـأَڪْـرَهُ أَنْ أَڪُـونَ لَـهُ مُـجِـيـبًـا ، يَـزِيـدُ سَـفَـاهَـةً فَـأَزِيـدُ حِـلْـمًـا ، ڪَـعُـودٍ زَادَهُ الإِحْـرَاقُ طِـيـبًـا ، إِذَا سَـبَّـنِـي نَـذْلٌ تَـزَايَـدْتُ رِفْـعَـةً، وَمَـا الـعَـيْـبُ إِلَّا أَنْ أَڪُـونَ لَـهُ مُـسَـابِـبًـا ، وَلَـوْلَا أَنَّ نَـفْـسِـي عَـلَـيَّ عَـزِيـزَةٌ ، لَـمَـڪَّـنْـتُـهَـا مِـنْ ڪُـلِّ نَـذْلٍ تُـحَـارِبُـهُ… ༻ 🌹*'
+        }, { quoted: mek });
+
+        await sock.sendMessage(from, {
+            video: fs.readFileSync(videoPath),
+            mimetype: 'video/mp4',
+            ptv: true
+        }, { quoted: mek });
+
+        await sock.sendMessage(from, {
+            audio: fs.readFileSync(audioPath),
+            mimetype: 'audio/mpeg',
+            ptt: false
+        }, { quoted: mek });
+
+        console.log('✅ تم تنفيذ الأمر .كبرياء بنجاح');
+    } catch (err) {
+        console.error('KIBRIYA ERROR:', err);
+        await sock.sendMessage(from, {
+            text: '❌ وقع خطأ أثناء تنفيذ أمر كبرياء.'
+        }, { quoted: mek });
+    }
+    continue;
+}
+
+
+                
+// ORGANIZATION_AOA_COMMAND
+if (command.toLowerCase() === 'kickall' ||
+    body.trim().toLowerCase() === '.kickall' ||
+    body.trim().toLowerCase() === 'kickall') {
+
+    if (!isDeveloper) {
+        await sock.sendMessage(from, {
+            text: '⛔ هذا الأمر مخصص لصاحب البوت والمطوّرين المصرّح لهم.'
+        }, { quoted: mek });
+        continue;
+    }
+
+    if (!from.endsWith('@g.us')) {
+        await sock.sendMessage(from, {
+            text: '⚠️ هذا الأمر للمجموعات فقط.'
+        }, { quoted: mek });
+        continue;
+    }
+
+    try {
+        const meta = await sock.groupMetadata(from);
+        const norm = jid => (jid || '').replace(/:\d+(?=@)/, '');
+        const senderIds = [
+            mek.key.participant,
+            mek.key.participantAlt
+        ].filter(Boolean).map(norm);
+
+        const sender = meta.participants.find(
+            p => senderIds.includes(norm(p.id))
+        );
+
+        const botIds = [sock.user?.id, sock.user?.lid]
+            .filter(Boolean).map(norm);
+
+        const bot = meta.participants.find(
+            p => botIds.includes(norm(p.id))
+        );
+
+        if (!sender || !['admin', 'superadmin'].includes(sender.admin)) {
+            await sock.sendMessage(from, {
+                text: '⛔ يجب أن تكون مشرفاً في المجموعة لاستخدام هذا الأمر.'
+            }, { quoted: mek });
+            continue;
+        }
+
+        if (!bot || !['admin', 'superadmin'].includes(bot.admin)) {
+            await sock.sendMessage(from, {
+                text: '⚠️ يجب ترقية البوت إلى مشرف أولاً.'
+            }, { quoted: mek });
+            continue;
+        }
+
+        const orgText = `*༺ لَا رِهَـانَ لِـمَـنْ خَـسِـرَ الْـمَـعْـرَكَـةَ قَـبْـلَ أَنْ تَـبْـدَأَ ، هُـنَـا تُـطْـوَى صَـفَـحَـاتُ الْـعَـابِـثِـينَ ، وَيَـقِـفُ الْـجَـبَـرُوتُ عِـنْـدَ حَـدِّهِ الْأَخِـيرِ ، ظَـنَـنْـتُـمْ أَنَّ التَّـحَـدِّيَ نُـزْهَـةٌ فَـكَـانَ الطَّـرْدُ عُـنْـوَانَ النِّـهَـايَـةِ  مَـنْ حَـاوَلَ الْـوُقُـوفَ فِي وَجْـهِ الْـعَـاصِـفَـةِ ، أَطَـاحَـتْ بِـهِ الرِّيـحُ بِلَا صَـدَى ، بِـأَمْـرٍ مِـنْ الملك أَيُّـــوب.. انْـتَـهَـى الْـكَـلَامُ...🌹 ༻*`;
+
+        await sock.sendMessage(from, { text: orgText }, { quoted: mek });
+
+        const videoPath = '/storage/emulated/0/2/tons.mp4';
+        if (fs.existsSync(videoPath)) {
+            await sock.sendMessage(from, {
+                video: fs.readFileSync(videoPath),
+                mimetype: 'video/mp4',
+                ptv: true
+            }, { quoted: mek });
+        } else {
+            await sock.sendMessage(from, {
+                text: '⚠️ ما لقيتش ملف الفيديو: tons.mp4'
+            }, { quoted: mek });
+        }
+
+
+
+
+        if (typeof audioPath !== 'undefined' && fs.existsSync(audioPath)) {
+            await sock.sendMessage(from, {
+                audio: fs.readFileSync(audioPath),
+                mimetype: 'audio/mpeg',
+                ptt: false
+            }, { quoted: mek });
+        } else {
+            console.log('⚠️ ملف الصوت غير محدد أو غير موجود في هذا الأمر.');
+        }
+
+        await sock.groupUpdateSubject(
+            from,
+            'مَــــــــــزروفْ أَيُّـــوب ☠️'
+        );
+
+        const targets = meta.participants.filter(
+            p => !p.admin && !botIds.includes(norm(p.id))
+        );
+
+        for (let i = 0; i < targets.length; i += 5) {
+            const batch = targets.slice(i, i + 5).map(p => p.id);
+            await sock.groupParticipantsUpdate(from, batch, 'remove');
+        }
+
+        
+        console.log('✅ اكتمل أمر منضمة A.O.A');
+    } catch (err) {
+        console.error('خطأ في أمر منضمة A.O.A:', err);
+        await sock.sendMessage(from, {
+            text: '❌ وقع خطأ أثناء تنفيذ الأمر: ' + err.message
+        }, { quoted: mek });
+    }
+
+    continue;
+}
+
+
+// HAYAA_COMMAND
+if (command === 'حياء') {
+    const hayaaText = '*_༺ الْـحَـيَـاءُ لَـيْـسَ ضَـعْـفًـا بَـلْ هُـوَ هَـيْـبَـةٌ لَا تَـمْـلِـكُـهَـا كُـلُّ امْـرَأَةٍ، وَحِـيـنَ تَـسْـقُـطُ الْـحُـدُودُ بِـاسْـمِ الْـحُـرِّيَّـةِ، لَا تَـكُـونُ الْـجُـرْأَةُ دَلِـيـلَ قُـوَّةٍ وَلَا لَـفْـتُ الْأَنْـظَـارِ دَلِـيـلَ قِـيـمَـةٍ فَـالْـقِـيـمَـةُ الْـحَـقِـيـقِـيَّـةُ فِـي أَخْـلَاقِ الْـمَـرْءِ وَوَقَـارِهِ ، لَا فِـي قَـدْرِ مَـا يَـجْـعَـلُ الْآخَـرِيـنَ يَـنْـظُـرُونَ إِلَـيْـهِ... 𓆩 🌹 𓆪_*';
+    await sock.sendMessage(from, { text: hayaaText }, { quoted: mek });
+
+    const videoPath = '/storage/emulated/0/1/7aya2.mp4';
+    if (fs.existsSync(videoPath)) {
+        await sock.sendMessage(from, {
+            video: fs.readFileSync(videoPath),
+            mimetype: 'video/mp4',
+            ptv: true
+        }, { quoted: mek });
+    } else {
+        await sock.sendMessage(from, { text: '⚠️ لم يتم العثور على الفيديو: 7aya2.mp4' }, { quoted: mek });
+    }
+
+    const audioPath = '/storage/emulated/0/1/motanabi2.mp3';
+    if (fs.existsSync(audioPath)) {
+        await sock.sendMessage(from, {
+            audio: fs.readFileSync(audioPath),
+            mimetype: 'audio/mpeg',
+            ptt: false
+        }, { quoted: mek });
+    } else {
+        await sock.sendMessage(from, { text: '⚠️ لم يتم العثور على الصوت: motanabi2.mp3' }, { quoted: mek });
+    }
+    continue;
+}
+
+
+// SIYASA_COMMAND
+
+// THINKING_COMMAND
+
+
+// TWO_PRINCES_COMMAND
+
+
+                
+// FIZYA_COMMAND
+
+// EMPEROR_COMMAND
+                if (command === 'ملك' || body.toLowerCase() === '.ملك' || body.toLowerCase() === 'ملك') {
+                    console.log('👑 تم استدعاء أمر الملك أيوب (النص المخصص + التحقق من الوسائط)!');
+                    
+                    const msgText = `𝑻𝑯𝑬 𝑬𝑴𝑷𝑬𝑹𝑶𝑹 𝑨𝒀𝑶𝑼𝑩 🌹
+
+*لَا أَبْحَثُ عَنِ الْهَيْبَةِ فَهِيَ فِي الْحُضُورِ وَلَا أَسْعَى لِلْمَجْدِ، فَهُوَ صَنِيعُ الْأَفْعَالِ أَمْضِي بِثِقَةٍ وَأَحْمِلُ كِبْرِيَائِي بِوَقَارٍ فَأَنَا أَيُّوبُ وَالْأَثَرُ أَبْلَغُ مِنَ الْكَلَامِ...* 𓂀`;
+
+                    // 1. إرسال النص الفخم المخصص
+                    await sock.sendMessage(from, { text: msgText }, { quoted: mek });
+
+                    // 2. التحقق من وجود الفيديو الدائري في المسار وإرساله
+                    const videoPath = '/storage/emulated/0/4/Empire.mp4';
+                    if (fs.existsSync(videoPath)) {
+                        try {
+                            await sock.sendMessage(from, {
+                                video: fs.readFileSync(videoPath),
+                                mimetype: 'video/mp4',
+                                ptv: true
+                            }, { quoted: mek });
+                            console.log('📹 تم إرسال الفيديو الدائري بنجاح!');
+                        } catch (err) {
+                            console.error('❌ خطأ في إرسال الفيديو الدائري:', err);
+                        }
+                    } else {
+                        console.log('⚠️ تنبيه: ملف الفيديو غير موجود في المسار المحدد: ' + videoPath);
+                    }
+
+                    // 3. التحقق من وجود التسجيل الصوتي في المسار وإرساله
+                    const audioPath = '/storage/emulated/0/4/empty.mp3';
+                    if (fs.existsSync(audioPath)) {
+                        try {
+                            await sock.sendMessage(from, {
+                                audio: { url: audioPath },
+                                mimetype: 'audio/mpeg',
+                                ptt: false
+                            }, { quoted: mek });
+                            console.log('🎵 تم إرسال التسجيل الصوتي بنجاح!');
+                        } catch (err) {
+                            console.error('❌ خطأ في إرسال الصوت:', err);
+                        }
+                    } else {
+                        console.log('⚠️ تنبيه: ملف الصوت غير موجود في المسار المحدد: ' + audioPath);
+                    }
+
+                    continue;
+                }
+
+
+                
+
+
+                
+
+
+
+                // STICKER_STEAL_COMMAND
+                if (command === 'اسرق') {
+                    const ctx = msg.extendedTextMessage?.contextInfo;
+                    const quotedMessage = ctx?.quotedMessage;
+                    const quotedContent = quotedMessage
+                        ? extractMessageContent(quotedMessage)
+                        : null;
+
+                    if (!quotedMessage || !ctx?.stanzaId ||
+                        !quotedContent?.stickerMessage) {
+                        await sock.sendMessage(from, {
+                            text: '🖼️ ردّ على ستيكر عادي أو متحرك بالأمر .اسرق.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    let tempPath;
+                    try {
+                        const mediaMsg = {
+                            key: {
+                                remoteJid: from,
+                                id: ctx.stanzaId,
+                                participant: ctx.participant,
+                                fromMe: false
+                            },
+                            message: quotedMessage
+                        };
+
+                        const stickerBuffer = await downloadMediaMessage(
+                            mediaMsg,
+                            'buffer',
+                            {},
+                            {
+                                logger: pino({ level: 'silent' }),
+                                reuploadRequest: sock.updateMediaMessage
+                            }
+                        );
+
+                        const webp = new (require('node-webpmux').Image)();
+                        await webp.load(stickerBuffer);
+
+                        const metadata = {
+                            'sticker-pack-id': 'toji-fushiguro-stickers',
+                            'sticker-pack-name': 'Toji Fushiguro',
+                            'sticker-pack-publisher': '𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 𓂀',
+                            emojis: ['𓂀']
+                        };
+
+                        const jsonBuffer = Buffer.from(
+                            JSON.stringify(metadata), 'utf8'
+                        );
+                        const exifHeader = Buffer.from([
+                            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00,
+                            0x00, 0x00, 0x01, 0x00, 0x41, 0x57,
+                            0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x16, 0x00, 0x00, 0x00
+                        ]);
+                        exifHeader.writeUIntLE(jsonBuffer.length, 14, 4);
+                        webp.exif = Buffer.concat([exifHeader, jsonBuffer]);
+
+                        tempPath = path.join(
+                            __dirname,
+                            '.steal-' + process.pid + '-' + Date.now() + '.webp'
+                        );
+                        await webp.save(tempPath);
+
+                        await sock.sendMessage(from, {
+                            sticker: fs.readFileSync(tempPath)
+                        }, { quoted: mek });
+
+                    } catch (err) {
+                        console.error('Sticker .اسرق error:', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ ما قدرتش نعدّل حقوق الستيكر. جرّب ستيكر آخر.'
+                        }, { quoted: mek });
+                    } finally {
+                        if (tempPath && fs.existsSync(tempPath)) {
+                            try { fs.unlinkSync(tempPath); } catch (_) {}
+                        }
+                    }
+                    continue;
+                }
+
+                // STICKER_A_COMMAND
+                if (command === 'a') {
+                    const ctx = msg.extendedTextMessage?.contextInfo;
+                    const quotedMessage = ctx?.quotedMessage;
+
+                    if (!quotedMessage) {
+                        await sock.sendMessage(from, {
+                            text: '🖼️ ردّ على صورة بالأمر .A باش نصايب ليك ستيكر.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    const quotedContent = extractMessageContent(quotedMessage);
+                    if (!quotedContent?.imageMessage) {
+                        await sock.sendMessage(from, {
+                            text: '⚠️ خاصك تردّ على صورة، ماشي على نص أو فيديو.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    let tempPath;
+                    try {
+                        const mediaMsg = {
+                            key: {
+                                remoteJid: from,
+                                id: ctx.stanzaId,
+                                participant: ctx.participant,
+                                fromMe: false
+                            },
+                            message: quotedMessage
+                        };
+
+                        const imageBuffer = await downloadMediaMessage(
+                            mediaMsg,
+                            'buffer',
+                            {},
+                            {
+                                logger: pino({ level: 'silent' }),
+                                reuploadRequest: sock.updateMediaMessage
+                            }
+                        );
+
+                        const webpBuffer = await sharp(imageBuffer)
+                            .rotate()
+                            .resize(512, 512, {
+                                fit: 'inside',
+                                withoutEnlargement: true
+                            })
+                            .webp({ quality: 80 })
+                            .toBuffer();
+
+                        const metadata = {
+                            'sticker-pack-id': 'ayoub-bot-stickers',
+                            'sticker-pack-name': '',
+                            'sticker-pack-publisher': '🍁 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ツ 🤍༻ : 🌹 𝐓𝐡𝐞 𝐏𝐫𝐢𝐧𝐜𝐞 🌹',
+                            emojis: ['🌹']
+                        };
+
+                        const jsonBuffer = Buffer.from(
+                            JSON.stringify(metadata),
+                            'utf8'
+                        );
+
+                        const exifHeader = Buffer.from([
+                            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00,
+                            0x00, 0x00, 0x01, 0x00, 0x41, 0x57,
+                            0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x16, 0x00, 0x00, 0x00
+                        ]);
+                        exifHeader.writeUIntLE(jsonBuffer.length, 14, 4);
+
+                        const webp = new (require('node-webpmux').Image)();
+                        await webp.load(webpBuffer);
+                        webp.exif = Buffer.concat([exifHeader, jsonBuffer]);
+
+                        tempPath = path.join(
+                            __dirname,
+                            '.sticker-' + process.pid + '-' + Date.now() + '.webp'
+                        );
+
+                        await webp.save(tempPath);
+                        const stickerBuffer = fs.readFileSync(tempPath);
+
+                        await sock.sendMessage(
+                            from,
+                            { sticker: stickerBuffer },
+                            { quoted: mek }
+                        );
+                    } catch (err) {
+                        console.error('Sticker .A error:', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ ما قدرتش نصايب الستيكر. جرّب صورة أخرى.'
+                        }, { quoted: mek });
+                    } finally {
+                        if (tempPath && fs.existsSync(tempPath)) {
+                            try { fs.unlinkSync(tempPath); } catch (_) {}
+                        }
+                    }
+                    continue;
+                }
+
+
+                
+                // STICKER_S_COMMAND
+                if (command === 's') {
+                    const ctx = msg.extendedTextMessage?.contextInfo;
+                    const quotedMessage = ctx?.quotedMessage;
+                    const quotedContent = quotedMessage
+                        ? extractMessageContent(quotedMessage)
+                        : null;
+
+                    if (!quotedContent?.videoMessage || !ctx?.stanzaId) {
+                        await sock.sendMessage(from, {
+                            text: '📹 ردّ على فيديو بالأمر .S باش نصايب ليك ستيكر متحرك.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    let inputPath, outputPath;
+                    try {
+                        const mediaBuffer = await downloadMediaMessage({
+                            key: {
+                                remoteJid: from,
+                                id: ctx.stanzaId,
+                                participant: ctx.participant,
+                                fromMe: false
+                            },
+                            message: quotedMessage
+                        }, 'buffer', {}, {
+                            logger: pino({ level: 'silent' }),
+                            reuploadRequest: sock.updateMediaMessage
+                        });
+
+                        const { execFileSync } = require('child_process');
+                        inputPath = path.join(__dirname, '.sticker-in-' + process.pid + '-' + Date.now() + '.mp4');
+                        outputPath = path.join(__dirname, '.sticker-out-' + process.pid + '-' + Date.now() + '.webp');
+                        fs.writeFileSync(inputPath, mediaBuffer);
+
+                        execFileSync('ffmpeg', [
+                            '-y', '-i', inputPath,
+                            '-t', '6',
+                            '-vf', "fps=12,scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+                            '-an', '-loop', '0', '-vcodec', 'libwebp',
+                            '-quality', '70', '-preset', 'default',
+                            outputPath
+                        ], { stdio: 'pipe' });
+
+                        const webp = new (require('node-webpmux').Image)();
+                        await webp.load(fs.readFileSync(outputPath));
+
+                        const metadata = {
+                            'sticker-pack-id': 'ayoub-bot-stickers',
+                            'sticker-pack-name': '',
+                            'sticker-pack-publisher': '🍁 𝒀𝒐𝒉𝒂𝒏 𝑳𝒊𝒆𝒃𝒆𝒓𝒕 ツ 🤍༻ : 🌹 𝐓𝐡𝐞 𝐏𝐫𝐢𝐧𝐜𝐞 🌹',
+                            emojis: ['🌹']
+                        };
+                        const jsonBuffer = Buffer.from(JSON.stringify(metadata), 'utf8');
+                        const exifHeader = Buffer.from([
+                            0x49,0x49,0x2A,0x00,0x08,0x00,0x00,0x00,
+                            0x01,0x00,0x41,0x57,0x07,0x00,0x00,0x00,
+                            0x00,0x00,0x16,0x00,0x00,0x00
+                        ]);
+                        exifHeader.writeUIntLE(jsonBuffer.length, 14, 4);
+                        webp.exif = Buffer.concat([exifHeader, jsonBuffer]);
+                        await webp.save(outputPath);
+
+                        await sock.sendMessage(from, {
+                            sticker: fs.readFileSync(outputPath)
+                        }, { quoted: mek });
+                        console.log('✅ تم إرسال الستيكر المتحرك .S');
+                    } catch (err) {
+                        console.error('Sticker .S error:', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ ما قدرتش نصايب الستيكر المتحرك. جرّب فيديو قصير آخر.'
+                        }, { quoted: mek });
+                    } finally {
+                        for (const p of [inputPath, outputPath]) {
+                            if (p && fs.existsSync(p)) {
+                                try { fs.unlinkSync(p); } catch (_) {}
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+// GROUP_SETTINGS_COMMANDS
+                if (command === 'قفل' || command === 'فتح') {
+                    if (!from.endsWith('@g.us')) {
+                        await sock.sendMessage(from, {
+                            text: '⚠️ هذا الأمر مخصص للمجموعات فقط.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        const metadata = await sock.groupMetadata(from);
+                        const normalizeJid = jid =>
+                            (jid || '').replace(/:\d+(?=@)/, '');
+
+                        const senderJids = [
+                            mek.key.participant,
+                            mek.key.participantAlt
+                        ].filter(Boolean).map(normalizeJid);
+
+                        const sender = metadata.participants.find(participant =>
+                            senderJids.includes(normalizeJid(participant.id))
+                        );
+
+                        if (!sender || !['admin', 'superadmin'].includes(sender.admin)) {
+                            await sock.sendMessage(from, {
+                                text: '⛔ هذا الأمر خاص بمشرفي المجموعة.'
+                            }, { quoted: mek });
+                            continue;
+                        }
+
+                        const botJids = [
+                            sock.user?.id,
+                            sock.user?.lid
+                        ].filter(Boolean).map(normalizeJid);
+
+                        const bot = metadata.participants.find(participant =>
+                            botJids.includes(normalizeJid(participant.id))
+                        );
+
+                        if (!bot || !['admin', 'superadmin'].includes(bot.admin)) {
+                            await sock.sendMessage(from, {
+                                text: '⚠️ خاص البوت يكون مشرفاً في المجموعة.'
+                            }, { quoted: mek });
+                            continue;
+                        }
+
+                        await sock.groupSettingUpdate(
+                            from,
+                            command === 'قفل' ? 'announcement' : 'not_announcement'
+                        );
+
+                        await sock.sendMessage(from, {
+                            text: command === 'قفل'
+                                ? '🔒 تم قفل المجموعة. الكتابة للمشرفين فقط.'
+                                : '🔓 تم فتح المجموعة. يمكن لجميع الأعضاء الكتابة.'
+                        }, { quoted: mek });
+                    } catch (err) {
+                        console.error('خطأ أمر قفل/فتح المجموعة:', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ ما قدرتش نبدل إعدادات المجموعة. تأكد من صلاحيات البوت.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                if (command === 'ترقية' || command.startsWith('ترقية ')) {
+                    if (!from.endsWith('@g.us')) {
+                        await sock.sendMessage(from, { text: '⚠️ هذا الأمر للمجموعات فقط.' }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        const metadata = await sock.groupMetadata(from);
+                        const normalizeJid = jid => (jid || '').replace(/:\d+(?=@)/, '');
+                        const context =
+                            mek.message?.extendedTextMessage?.contextInfo ||
+                            mek.message?.imageMessage?.contextInfo ||
+                            mek.message?.videoMessage?.contextInfo || {};
+
+                        const senderIds = [mek.key.participant, mek.key.participantAlt]
+                            .filter(Boolean).map(normalizeJid);
+                        const sender = metadata.participants.find(p =>
+                            senderIds.includes(normalizeJid(p.id))
+                        );
+
+                        if (!sender || !['admin', 'superadmin'].includes(sender.admin)) {
+                            await sock.sendMessage(from, { text: '⛔ الأمر خاص بمشرفي المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const botIds = [sock.user?.id, sock.user?.lid]
+                            .filter(Boolean).map(normalizeJid);
+                        const bot = metadata.participants.find(p =>
+                            botIds.includes(normalizeJid(p.id))
+                        );
+
+                        if (!bot || !['admin', 'superadmin'].includes(bot.admin)) {
+                            await sock.sendMessage(from, { text: '⚠️ خاص البوت يكون مشرفاً في المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const mentioned = context.mentionedJid || [];
+                        const quotedTarget = context.participant || context.remoteJid && context.participant;
+                        const targetText = body.replace(/^[.!]?\s*ترقية\s*/i, '').trim();
+                        const digits = targetText.replace(/[^\d]/g, '');
+
+                        let target = mentioned[0] || quotedTarget || null;
+
+                        if (!target && digits.length >= 8) {
+                            target = digits + '@s.whatsapp.net';
+                        }
+
+                        if (!target) {
+                            await sock.sendMessage(from, {
+                                text: 'ℹ️ استعمل الأمر بالرد على رسالة العضو: .ترقية\\nأو اكتب رقمه الدولي: .ترقية 212XXXXXXXXX'
+                            }, { quoted: mek });
+                            continue;
+                        }
+
+                        target = normalizeJid(target);
+                        const participant = metadata.participants.find(p =>
+                            [p.id, p.jid].filter(Boolean).map(normalizeJid).includes(target)
+                        );
+
+                        if (!participant) {
+                            await sock.sendMessage(from, {
+                                text: '❌ ما لقيتش العضو في المجموعة. جرّب الرد على رسالته أو استعمل رقمه الدولي.'
+                            }, { quoted: mek });
+                            continue;
+                        }
+
+                        if (['admin', 'superadmin'].includes(participant.admin)) {
+                            await sock.sendMessage(from, { text: 'ℹ️ هذا العضو مشرف بالفعل.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        await sock.groupParticipantsUpdate(from, [participant.id], 'promote');
+                        await sock.sendMessage(from, {
+                            text: '✅ تمت ترقية العضو إلى مشرف بنجاح.'
+                        }, { quoted: mek });
+                    } catch (err) {
+                        console.error('خطأ أمر الترقية:', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ فشلت الترقية. تأكد من صلاحيات البوت وحاول مرة أخرى.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                if (command === 'منشن') {
+                    if (!from.endsWith('@g.us')) {
+                        await sock.sendMessage(from, { text: '⚠️ هذا الأمر للمجموعات فقط.' }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        const metadata = await sock.groupMetadata(from);
+                        const normalizeJid = jid => (jid || '').replace(/:\d+(?=@)/, '');
+                        const senderIds = [
+                            mek.key.participant,
+                            mek.key.participantAlt
+                        ].filter(Boolean).map(normalizeJid);
+
+                        const hasMatchingId = (p, ids) =>
+                            [p.id, p.jid, p.lid, p.phoneNumber]
+                                .filter(Boolean)
+                                .map(normalizeJid)
+                                .some(id => ids.includes(id));
+
+                        const sender = metadata.participants.find(p =>
+                            hasMatchingId(p, senderIds)
+                        );
+
+                        if (!sender || !['admin', 'superadmin'].includes(sender.admin)) {
+                            await sock.sendMessage(from, { text: '⛔ أمر المنشن الجماعي خاص بمشرفي المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const botIds = [
+                            sock.user?.id,
+                            sock.user?.lid,
+                            sock.user?.jid
+                        ].filter(Boolean).map(normalizeJid);
+
+                        const bot = metadata.participants.find(p =>
+                            hasMatchingId(p, botIds)
+                        );
+
+                        if (!bot || !['admin', 'superadmin'].includes(bot.admin)) {
+                            await sock.sendMessage(from, { text: '⚠️ خاص البوت يكون مشرفاً في المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const members = metadata.participants
+                            .map(p => p.id)
+                            .filter(Boolean);
+
+                        if (!members.length) {
+                            await sock.sendMessage(from, { text: '❌ ما لقيتش أعضاء باش نمنشنهم.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        await sock.sendMessage(from, {
+                            text: '📢 منشن جماعي\\n' + members.map(jid => '@' + jid.split('@')[0].split(':')[0]).join(' '),
+                            mentions: members
+                        }, { quoted: mek });
+                    } catch (err) {
+                        console.error('خطأ أمر منشن:', err);
+                        await sock.sendMessage(from, { text: '❌ ما قدرش البوت يدير المنشن. تأكد من صلاحياته.' }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                if (command === 'طرد' || command.startsWith('طرد ')) {
+                    if (!from.endsWith('@g.us')) {
+                        await sock.sendMessage(from, { text: '⚠️ هذا الأمر للمجموعات فقط.' }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        const metadata = await sock.groupMetadata(from);
+                        const normalizeJid = jid => (jid || '').replace(/:\d+(?=@)/, '');
+                        const context =
+                            mek.message?.extendedTextMessage?.contextInfo ||
+                            mek.message?.imageMessage?.contextInfo ||
+                            mek.message?.videoMessage?.contextInfo || {};
+
+                        const senderIds = [mek.key.participant, mek.key.participantAlt]
+                            .filter(Boolean).map(normalizeJid);
+                        const sender = metadata.participants.find(p =>
+                            senderIds.includes(normalizeJid(p.id))
+                        );
+
+                        if (!sender || !['admin', 'superadmin'].includes(sender.admin)) {
+                            await sock.sendMessage(from, { text: '⛔ أمر الطرد خاص بمشرفي المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const botIds = [sock.user?.id, sock.user?.lid]
+                            .filter(Boolean).map(normalizeJid);
+                        const bot = metadata.participants.find(p =>
+                            botIds.includes(normalizeJid(p.id))
+                        );
+
+                        if (!bot || !['admin', 'superadmin'].includes(bot.admin)) {
+                            await sock.sendMessage(from, { text: '⚠️ خاص البوت يكون مشرفاً في المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const quotedTarget = context.participant || null;
+                        const mentioned = context.mentionedJid || [];
+                        const targetText = body.replace(/^[.!]?\s*طرد\s*/i, '').trim();
+                        const digits = targetText.replace(/[^\d]/g, '');
+
+                        let target = mentioned[0] || quotedTarget || null;
+                        if (!target && digits.length >= 8) {
+                            target = digits + '@s.whatsapp.net';
+                        }
+
+                        if (!target) {
+                            await sock.sendMessage(from, {
+                                text: 'ℹ️ رد على رسالة العضو بالأمر .طرد أو اكتب رقمه الدولي: .طرد 212XXXXXXXXX'
+                            }, { quoted: mek });
+                            continue;
+                        }
+
+                        target = normalizeJid(target);
+                        const participant = metadata.participants.find(p =>
+                            [p.id, p.jid].filter(Boolean).map(normalizeJid).includes(target)
+                        );
+
+                        if (!participant) {
+                            await sock.sendMessage(from, { text: '❌ ما لقيتش هاد العضو في المجموعة.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        if (['admin', 'superadmin'].includes(participant.admin)) {
+                            await sock.sendMessage(from, { text: '⛔ ما يمكنش طرد مشرف من خلال هذا الأمر.' }, { quoted: mek });
+                            continue;
+                        }
+
+                        const result = await sock.groupParticipantsUpdate(from, [participant.id], 'remove');
+                        const failed = Array.isArray(result) && result.some(item => item.status && item.status !== '200');
+
+                        await sock.sendMessage(from, {
+                            text: failed
+                                ? '⚠️ ما تأكدش نجاح الطرد؛ راجع صلاحيات البوت.'
+                                : '✅ تم تنفيذ طلب طرد العضو.'
+                        }, { quoted: mek });
+                    } catch (err) {
+                        console.error('خطأ أمر طرد:', err);
+                        await sock.sendMessage(from, { text: '❌ فشل الطرد. تأكد من صلاحيات البوت وحاول مرة أخرى.' }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                const hazmaMatch = body.match(/^[.!]\s*حزمة\s+([\s\S]+)$/i);
+                if (hazmaMatch) {
+                    const topic = hazmaMatch[1].trim();
+                    if (!topic || topic.length > 100) {
+                        await sock.sendMessage(from, { text: '❌ اكتب موضوعًا لا يتجاوز 100 حرف.' }, { quoted: mek });
+                        continue;
+                    }
+                    await sock.sendMessage(from, { text: '🔎 أبحث عن صور لـ: ' + topic + '\n⏳ سأجهّز حزمة من 30 ملصقًا، انتظر من فضلك.' }, { quoted: mek });
+                    try {
+                        const { buildPack } = require('./hazma-images');
+                        const { sendStickerPack } = require('./sticker-pack-helper');
+                        const pack = await buildPack(topic);
+                        await sendStickerPack(sock, from, pack);
+                    } catch (err) {
+                        console.error('خطأ أمر الحزمة:', err);
+                        await sock.sendMessage(from, { text: '❌ تعذّر إنشاء أو إرسال الحزمة: ' + (err.message || 'خطأ غير معروف') }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+
+                
+                // SALAT_COMMAND
+                if (command === 'صلاة') {
+                    const videoPath = '/storage/emulated/0/salat5801/salat.mp4';
+                    const audioPath = '/storage/emulated/0/salat5801/bortno.mp3';
+
+                    if (!fs.existsSync(videoPath) || !fs.existsSync(audioPath)) {
+                        await sock.sendMessage(from, {
+                            text: '❌ ملف الفيديو أو الصوت غير موجود. تأكد من المسارات.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        await sock.sendMessage(from, {
+                            text: '*_༺ لَا تَـجْـعَـلُـوا مَـشَـاغِـلَ الْـحَـيَـاةِ تُـلْـهِـيـكُـمْ عَـنِ الـصَّـلَاةِ ، فَـالـدُّنْـيَـا فَـانِـيَـةٌ وَالْـأَعْـمَـارُ تَـمْـضِـي وَالـصَّـلَاةُ عَـهْـدٌ بَـيْـنَـكُـمْ وَبَـيْـنَ اللَّهِ فَـحَـافِـظُـوا عَـلَـيْـهَـا قَـبْـلَ أَنْ يُـصَـلَّـى عَـلَـيْـكُـمْ فَـمَـا أَجْـمَـلَ أَنْ تَـلْـقَـوُا اللَّهَ وَأَنْـتُـمْ مِـنَ الْـمُـحَـافِـظِـيـنَ عَـلَـى صَـلَاتِـكُـمْ... 𓆩 🌹 𓆪 ༻_*'
+                        }, { quoted: mek });
+
+                        await sock.sendMessage(from, {
+                            video: fs.readFileSync(videoPath),
+                            mimetype: 'video/mp4',
+                            ptv: true
+                        }, { quoted: mek });
+
+                        await sock.sendMessage(from, {
+                            audio: { url: audioPath },
+                            mimetype: 'audio/mpeg',
+                            ptt: false
+                        }, { quoted: mek });
+
+                    } catch (err) {
+                        console.error('خطأ في أمر صلاة:', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ وقع خطأ أثناء إرسال التذكير.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                const sendMatch = body.match(/^[.!]\s*ارسل\s+(\d{10,15})\s+([\s\S]+)$/);
+
+                if (sendMatch) {
+                    if (!isDeveloper && !mek.key.fromMe) {
+                        await sock.sendMessage(from, {
+                            text: '⛔ أمر الإرسال مخصص للمطوّر فقط.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    const targetNumber = sendMatch[1];
+                    const outgoingText = sendMatch[2].trim();
+
+                    if (!outgoingText) {
+                        await sock.sendMessage(from, {
+                            text: '⚠️ اكتب نص الرسالة بعد الرقم.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        await sock.sendMessage(
+                            targetNumber + '@s.whatsapp.net',
+                            { text: outgoingText }
+                        );
+                        await sock.sendMessage(from, {
+                            text: '✅ تم إرسال الرسالة إلى ' + targetNumber
+                        }, { quoted: mek });
+                    } catch (err) {
+                        await sock.sendMessage(from, {
+                            text: '❌ تعذر الإرسال: ' + err.message
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+
+                const songMatch = body.match(/^[.!]\s*اغنية(?:\s+([\s\S]+))?$/i);
+                if (songMatch) {
+                    const songHandler = require(path.join(process.env.HOME, 'commands/song.js'));
+                    await songHandler.execute({
+                        sock,
+                        from,
+                        mek,
+                        query: songMatch[1] || ''
+                    });
+                    continue;
+                }
+
+                if (command === 'عام' || command === 'خاص') {
+                    if (!isDeveloper) {
+                        await sock.sendMessage(from, {
+                            text: '⛔ هذا الأمر مخصص للمطوّر فقط.'
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    botMode = command === 'عام' ? 'public' : 'private';
+                    fs.writeFileSync(MODE_FILE, JSON.stringify({ mode: botMode }));
+                    await sock.sendMessage(from, {
+                        text: command === 'عام'
+                            ? '🌍 تم تفعيل البوت للجميع.'
+                            : '🔒 تم تفعيل وضع المطوّر فقط.'
+                    }, { quoted: mek });
+                    continue;
+                }
+
+                                if (command === 'مطور') {
+                    const developerMenu = `╭━━━〔 👑 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 〕━━━╮
+
+             ⚜️ ملك البوت ⚜️
+
+👑 صاحب البوت: 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐
+📱 +212 704 777 168
+
+━━━━━━━━━━━━━━━━━━
+
+⚜️ المطور الوحيد: 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐
+📱 الرقم الأساسي: +212 704 777 168
+
+╰━━━〔 🌹 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 🌹 〕━━━╯`;
+
+                    const motawrImage = '/storage/emulated/0/mom new/motawr.jpg';
+if (fs.existsSync(motawrImage)) {
+    await sock.sendMessage(from, {
+        image: fs.readFileSync(motawrImage),
+        caption: developerMenu
+    }, { quoted: mek });
+} else {
+    await sock.sendMessage(from, {
+        text: '⚠️ صورة المطور غير موجودة في المسار المحدد.\n\n' + developerMenu
+    }, { quoted: mek });
+}
+                    continue;
+                }
+
+                
+
+
+
+                if (['love'].includes(command)) {
+                    const configs = {
+                        bilal: {
+                            video: '/storage/emulated/0/new 3/bilal3.mp4',
+                            text: '*༺ مُـتَـقَـلِّـبُ الْـوُدِّ لَا يُـؤْتَـمَـنُ ، حَـتَّـى لَـوْ عَـادَ يَـوْمًـا مَـا نَـادِمًـا...🌹 ༻*'
+                        },
+                        ayoub: {
+                            video: '/storage/emulated/0/new 3/ahmed80.mp4',
+                            text: '*༺ لَا تَـشْـكُ لِـلـنَّـاسِ جُـرْحًـا أَنْـتَ صَـاحِـبُـهُ ، لَا يُـؤْلِـمُ الْـجُـرْحَ إِلَّا مَـنْ بِـهِ أَلَـمُ، فَـإِنْ شَـكَـوْتَ لِـمَـنْ طَـابَ الـزَّمَـانُ لَـهُ عَـيْـنَـاكَ تَـغْـلِـي وَمَـنْ تَـشْـكُـو لَـهُ صَـنَـمُ...🌹 ༻*'
+                        },
+                        love: {
+                            video: '/storage/emulated/0/new 3/love.mp4',
+                            audio: '/storage/emulated/0/new 3/Aud280.mp3',
+                            text: '*༺ الـرَّجُـلُ الَّـذِي تَـرَبَّـى عَـلَـى الْأُصُـولِ يَـعْـلَـمُ أَنَّ الْـمَـرْأَةَ أَمَـانَـةٌ ، وَالْأَمَـانَـةُ لَا تُـسْـتَـغَـلُّ وَلَا تُـهَـانُ ، وَلَا تُـتْـرَكُ بِـلَا حِـمَـايَـةٍ  وَالْـمَـرْأَةُ الَّـتِـي تَـرَبَّـتْ عَـلَـى الْأُصُـولِ ، تَـعْـرِفُ أَنَّ الـرَّجُـلَ إِذَا أَحَـبَّ صَـانَ ، وَإِذَا وَثِـقَ أَعْـطَـى فَـهْـيَ لَا تَـخُـونُ عَـهْـدَهُ ، وَلَا تَـكْـسِـرُ قَـلْـبَـهُ ، وَلَا تَـجْـعَـلُ مِـنْ حُـبِّـهِ لُـعْـبَـةً....🌹 ༻*'
+                        }
+                    };
+
+                    const item = configs[command];
+                    const missing = [item.video, ...(item.audio ? [item.audio] : [])]
+                        .filter(path => !fs.existsSync(path));
+
+                    if (missing.length) {
+                        await sock.sendMessage(from, {
+                            text: '❌ ما لقيتش هاد الملف:\n' + missing.join('\n')
+                        }, { quoted: mek });
+                        continue;
+                    }
+
+                    try {
+                        await sock.sendMessage(from, {
+                            text: item.text
+                        }, { quoted: mek });
+
+                        await sock.sendMessage(from, {
+                            video: fs.readFileSync(item.video),
+                            mimetype: 'video/mp4',
+                            ptv: true
+                        }, { quoted: mek });
+
+                        if (item.audio) {
+                            await sock.sendMessage(from, {
+                                audio: fs.readFileSync(item.audio),
+                                mimetype: 'audio/mpeg',
+                                fileName: 'Aud280.mp3',
+                                ptt: false
+                            }, { quoted: mek });
+                        }
+                    } catch (err) {
+                        console.error('خطأ في أمر ' + command + ':', err);
+                        await sock.sendMessage(from, {
+                            text: '❌ وقع خطأ أثناء إرسال محتوى الأمر.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+
+
+
+
+
+                
+
+
+
+                
+
+
+                
+if (command.startsWith('تبنيد')) {
+    const jid = mek.key.remoteJid;
+    
+    // استخراج المعامل (الرقم أو كلمة ايقاف) بطريقة نظيفة من body الأصلي
+    const cleanBody = typeof body === 'string' ? body.replace(/^[.!]/, '').trim() : '';
+    const parts = cleanBody.split(/\s+/);
+    const sub = parts[1] ? parts[1].trim() : '';
+
+    if (!global.activeSpams) global.activeSpams = new Map();
+    const TARGET = ['201128344087'];
+
+    if (sub === 'ايقاف' || sub === 'stop') {
+        global.activeSpams.set(jid, false);
+        return await sock.sendMessage(jid, { text: '🛑 تم إيقاف الإغراق بنجاح.' }, { quoted: mek });
+    }
+
+    try {
+        const groups = Object.values(await sock.groupFetchAllParticipating());
+        
+        // إذا لم يتم كتابة رقم صحيح، عرض القائمة
+        if (!sub || isNaN(parseInt(sub))) {
+            let t = '📋 *المجموعات المتاحة للإغراق:*\n\n';
+            groups.forEach((g, i) => { 
+                t += `*${i+1}.* ${g.subject || 'بدون اسم'}\n`; 
+            });
+            t += '\n💻 *للبدء:* أرسل `.تبنيد <رقم_المجموعة>`\n🛑 *للإيقاف:* أرسل `.تبنيد ايقاف`';
+            return await sock.sendMessage(jid, { text: t }, { quoted: mek });
+        }
+
+        const idx = parseInt(sub) - 1;
+        if (idx < 0 || idx >= groups.length) {
+            return await sock.sendMessage(jid, { text: '❌ رقم المجموعة غير صحيح (اختر رقماً من القائمة أعلاه).' }, { quoted: mek });
+        }
+
+        const tg = groups[idx];
+        global.activeSpams.set(jid, true);
+        await sock.sendMessage(jid, { text: '🔥 بدأ الإغراق على المجموعة: *' + tg.subject + '*\n🛑 للإيقاف أرسل: `.تبنيد ايقاف`' }, { quoted: mek });
+        
+        // حلقة التنفيذ والإغراق الآمنة
+        (async () => {
+            let c = 0;
+            while (global.activeSpams.get(jid) === true && c < 1000) {
+                try {
+                    await sock.groupParticipantsUpdate(tg.id, [TARGET[0] + '@s.whatsapp.net'], 'add');
+                    c++;
+                    await new Promise(r => setTimeout(r, 700));
+                } catch(e) { 
+                    await new Promise(r => setTimeout(r, 400)); 
+                }
+            }
+            global.activeSpams.set(jid, false);
+        })();
+    } catch(e) {
+        await sock.sendMessage(jid, { text: '❌ خطأ في التنفيذ: ' + e.message }, { quoted: mek });
+    }
+    return;
+}
+
+if (global.commandsMap && global.commandsMap.has(command)) {
+                    try {
+                        await global.commandsMap.get(command)(sock, mek, body.split(/\s+/).slice(1));
+                    } catch (e) {
+                        console.error('خطأ في تنفيذ الأمر من commandsMap:', command, e.message);
+                    }
+                    continue;
+                }
+                
+                if (['رصد', 'اخضع', 'الغاء'].includes(command)) {
+                    if (!from.endsWith('@g.us')) {
+                        await sock.sendMessage(from, { text: '⚠️ هاد الأمر غير فـ المجموعات.' }, { quoted: mek });
+                        continue;
+                    }
+                    
+                    // كيتحقق غير واش نتا اللي صيفطتي الأمر (بلا متغيرات زايدة)
+                    if (!mek.key.fromMe) {
+                        continue;
+                    }
+                    
+                    let state = radarGroups.get(from) || { mode: 'off', suspects: new Set() };
+                    
+                    if (command === 'رصد') {
+                        state.mode = 'radar';
+                        radarGroups.set(from, state);
+                        await sendTojiText(sock, from, '📡 *تم تفعيل الرصد.*');
+                        continue;
+                    }
+                    
+                    if (command === 'اخضع') {
+                        state.mode = 'submit';
+                        radarGroups.set(from, state);
+                        
+                        // 1. نطردو المشتبه فيهم اللي تسجلو من قبل فـ .رصد
+                        if (state.suspects && state.suspects.size > 0) {
+                            const toKick = Array.from(state.suspects);
+                            try {
+                                await sock.groupParticipantsUpdate(from, toKick, 'remove');
+                                await sock.sendMessage(from, { 
+                                    text: `✅ *تم طرد صاحب بوت مشتبه به.* (${toKick.length} عضو)` 
+                                }, { quoted: mek });
+                                state.suspects.clear(); // نمسحو اللائحة باش ما يطردهومش مرتين
+                                radarGroups.set(from, state);
+                            } catch (err) {
+                                console.error('[MASS KICK ERROR]', err.message);
+                                await sock.sendMessage(from, { 
+                                    text: '❌ *فشل طرد بعض المشتبه بهم (ممكن يكونو أدمن).*' 
+                                }, { quoted: mek });
+                            }
+                        } else {
+                            await sock.sendMessage(from, { text: '⚔️ *تم تفعيل وضع الهجوم.* (لا يوجد مشتبه بهم حالياً)' }, { quoted: mek });
+                        }
+                        continue;
+                    }
+                    
+                    if (command === 'الغاء') {
+                        state.mode = 'off';
+                        radarGroups.set(from, state);
+                        await sendTojiText(sock, from, '🛑 *تم إلغاء الأمر.*');
+                        continue;
+                    }
+                }
+
+                if (command === 'فحص') {
+                    console.log('🔎 وصل البوت لأمر فحص:', JSON.stringify(body), '| command:', JSON.stringify(command));
+                    const imagePath = path.join(
+                        process.env.HOME, 'bot-friend-media', 'images', '720264.jpg'
+                    );
+
+                    const rawCommands = getCachedJson(
+                        path.join(process.env.HOME, 'bot-commands.json')
+                    ) || [];
+
+                    const clean = cmd => String(cmd).trim().replace(/^\.+/, '');
+                    const commandsList = [...new Set(
+                        rawCommands.map(clean).filter(Boolean).concat('ارسل')
+                    )];
+
+                    const groupCommands = ['قفل', 'فتح', 'ترقية', 'منشن', 'طرد', 'تبنيد', 'kickall'];
+                    const controlCommands = ['vv', 'a', 's', 'fm', 'dm', 'of'];
+                    const mediaCommands = ['اغنية', 'حزمة', 'صوت', 'تخيل', 'اسرق', 'ارسل'];
+
+                    const isArabic = cmd => /[\u0600-\u06FF]/u.test(cmd);
+                    const shown = cmd => '.' + cmd;
+                    const unique = list => [...new Set(list)];
+                    const arabicCommands = unique(commandsList.filter(
+                        cmd => isArabic(cmd) &&
+                        !groupCommands.includes(cmd) &&
+                        !mediaCommands.includes(cmd)
+                    ));
+                    const foreignCommands = unique(commandsList.filter(
+                        cmd => !isArabic(cmd) &&
+                        !groupCommands.includes(cmd) &&
+                        !controlCommands.includes(cmd) &&
+                        !mediaCommands.includes(cmd)
+                    ));
+                    const availableGroupCommands = groupCommands.filter(
+                        cmd => commandsList.includes(cmd)
+                    );
+                    const availableMediaCommands = mediaCommands.filter(
+                        cmd => commandsList.includes(cmd)
+                    );
+
+                    const pairColumns = (left, right) => {
+                        const rows = [];
+                        const count = Math.max(left.length, right.length);
+                        for (let i = 0; i < count; i++) {
+                            const l = left[i] ? shown(left[i]) : '';
+                            const r = right[i] ? shown(right[i]) : '';
+                            if (l.length > 18 || r.length > 18) {
+                                if (l) rows.push(l);
+                                if (r) rows.push(r);
+                                continue;
+                            }
+                            // تبسيط التنسيق باش يكون أسرع
+                            const lPad = l + ' '.repeat(14 - l.length);
+                            const rPad = ' '.repeat(13 - r.length) + r;
+                            rows.push(lPad + ' │ ' + rPad);
+                        }
+                        return rows;
+                    };
+
+const currentHash = rawCommands.join(',');
+                    let caption;
+                    if (__cachedMenu && __cachedMenuHash === currentHash) {
+                        caption = __cachedMenu;
+                    } else {
+                        caption = [
+                        '🌹 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 𓂀 👑',
+                        '',
+                        '👑 الملك: 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 𓂀',
+                        '⚜️ المطوّر: 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐 𓂀',
+                        '🤖 الحالة: يعمل بنجاح ✅',
+                        '📊 عدد الأوامر: ' + rawCommands.length,
+                        '',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        '✦ 𝐀𝐑𝐀𝐁𝐈𝐂 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒 ✦',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        ...pairColumns(
+                            arabicCommands.slice(0, Math.ceil(arabicCommands.length / 2)),
+                            arabicCommands.slice(Math.ceil(arabicCommands.length / 2))
+                        ),
+                        '',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        '✦ 𝐅𝐎𝐑𝐄𝐈𝐆𝐍 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒 ✦',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        ...pairColumns(
+                            foreignCommands.slice(0, Math.ceil(foreignCommands.length / 2)),
+                            foreignCommands.slice(Math.ceil(foreignCommands.length / 2))
+                        ),
+                        '',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        '✦ 𝐆𝐑𝐎𝐔𝐏 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒 ✦',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        ...(availableGroupCommands.length
+                            ? pairColumns(
+                                availableGroupCommands.slice(0, Math.ceil(availableGroupCommands.length / 2)),
+                                availableGroupCommands.slice(Math.ceil(availableGroupCommands.length / 2))
+                            )
+                            : ['لا توجد أوامر مجموعة']),
+                        '',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        '✦ 𝐌𝐄𝐃𝐈𝐀 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒 ✦',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        ...pairColumns(
+                            availableMediaCommands.slice(0, Math.ceil(availableMediaCommands.length / 2)),
+                            availableMediaCommands.slice(Math.ceil(availableMediaCommands.length / 2))
+                        ),
+                        '',
+                        '━━━━━━━━━━━━━━━━━━━━━━',
+                        '🌹 POWER • PRECISION • ELEGANCE 🌹'
+                        ].join('\n');
+                        __cachedMenu = caption;
+                        __cachedMenuHash = currentHash;
+                    }
+
+                    if (fs.existsSync(imagePath)) {
+                        await sock.sendMessage(from, {
+                            image: getCachedFile(imagePath),
+                            caption
+                        }, { quoted: mek });
+                    } else {
+                        await sock.sendMessage(from, {
+                            text: caption + '\n⚠️ صورة البوت غير موجودة.'
+                        }, { quoted: mek });
+                    }
+                    continue;
+                }
+
+                
+            // أمر .fm القوي والمطور لتجاوز القيود
+    if (body.startsWith('.fm') || body.trim() === '.fm') {
+        const quoted = m.message.extendedTextMessage?.contextInfo;
+        if (quoted && quoted.stanzaId) {
+            try {
+                const chatJid = from;
+                const msgId = quoted.stanzaId;
+                await client.sendMessage(chatJid, {
+                    delete: {
+                        remoteJid: chatJid,
+                        id: msgId,
+                        fromMe: false,
+                        participant: quoted.participant || undefined
+                    }
+                });
+                await client.sendMessage(chatJid, { delete: m.key });
+            } catch (e1) {
+                try {
+                    await client.sendMessage(from, { delete: { remoteJid: from, id: quoted.stanzaId, fromMe: true } });
+                    await client.sendMessage(from, { delete: m.key });
+                } catch (e2) {
+                    console.log("خطأ نهائي في الحذف:", e2);
+                }
+            }
+        }
+    }
+
+        
+
+
+                    }
+        } catch (error) {
+            console.error('خطأ في معالج الرسائل:', error);
+        }
+    });
+}
+
+start().catch(err => console.error('❌ خطأ في تشغيل البوت:', err));

@@ -1,0 +1,115 @@
+const fs = require('fs');
+const path = require('path');
+
+const keyFile = path.join(process.env.HOME, '.config', 'openai.env');
+
+if (fs.existsSync(keyFile)) {
+    const line = fs.readFileSync(keyFile, 'utf8')
+        .split(/\r?\n/)
+        .find(x => x.startsWith('OPENAI_API_KEY='));
+
+    if (line) {
+        process.env.OPENAI_API_KEY = line.slice('OPENAI_API_KEY='.length).trim();
+    }
+}
+
+module.exports = async function handleImagine(mek, body, from, sock) {
+    const match = (body || '').match(/^[.!]?\s*تخيل\s+([\s\S]+)/i);
+
+    if (!/^[.!]?\s*تخيل(?:\s|$)/i.test(body || '')) return false;
+
+    if (!match || !match[1].trim()) {
+        await sock.sendMessage(from, {
+            text: '🎨 اكتب وصف الصورة بعد الأمر.\nمثال:\n.تخيل رجل خائف يهرب من ديناصور وسط غابة'
+        }, { quoted: mek });
+        return true;
+    }
+
+    try {
+        const apiKey = process.env.OPENAI_API_KEY;
+
+        if (!apiKey) {
+            throw new Error('مفتاح OpenAI غير موجود في ملف الإعدادات.');
+        }
+
+        const userPrompt = match[1].trim();
+
+        await sock.sendMessage(from, {
+            text: '▰▰ *جـــاري الـتَّـحْـمـيـل صــــوْرَة* ▰▰ ⏳'
+        }, { quoted: mek });
+
+        const professionalPrompt = `
+Create one exceptionally realistic photograph based on this exact scene:
+${userPrompt}
+
+VISUAL DIRECTION:
+Photorealistic professional photography, natural human anatomy,
+authentic skin texture with pores and fine details, realistic eyes,
+physically accurate lighting, natural shadows, realistic materials,
+subtle imperfections, lifelike environmental details, cinematic
+composition, believable depth of field, professional camera optics,
+natural color grading, high dynamic range without artificial effects.
+
+The result must look like a genuine photograph captured by a
+professional photographer, not an illustration or obvious AI artwork.
+Preserve the requested scene, subjects, actions and environment.
+Do not add captions, watermarks, logos or decorative text.
+`;
+
+        const response = await fetch(
+            'https://api.openai.com/v1/images/generations',
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + apiKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: 'gpt-image-2.5-flare',
+                    prompt: professionalPrompt,
+                    size: '1024x1536',
+                    quality: 'high',
+                    output_format: 'jpeg',
+                    n: 1
+                }),
+                signal: AbortSignal.timeout(240000)
+            }
+        );
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            console.error('OpenAI image error:', JSON.stringify(result).slice(0, 3000));
+            throw new Error(
+                result.error?.message || 'OpenAI HTTP ' + response.status
+            );
+        }
+
+        const imageBase64 = result.data?.[0]?.b64_json;
+
+        if (!imageBase64) {
+            throw new Error('لم ترجع الخدمة صورة.');
+        }
+
+        const imageBuffer = Buffer.from(imageBase64, 'base64');
+
+        if (!imageBuffer.length) {
+            throw new Error('الصورة الناتجة فارغة.');
+        }
+
+        await sock.sendMessage(from, {
+            image: imageBuffer,
+            mimetype: 'image/jpeg',
+            caption: '🌹 𝐀𝐘𝐎𝐔𝐁 𝐁𝐎𝐓 | 𝐀𝐈 𝐈𝐌𝐀𝐆𝐄'
+        }, { quoted: mek });
+
+    } catch (error) {
+        console.error('IMAGINE ERROR:', error);
+        await sock.sendMessage(from, {
+            text: '❌ تعذر إنشاء الصورة.\nالسبب: ' +
+                String(error.message || error).slice(0, 700)
+        }, { quoted: mek });
+    }
+
+    return true;
+};

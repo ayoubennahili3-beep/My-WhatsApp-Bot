@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@elevenlabs/cli": "^1.8.0"
+  },
+  "_npx": {
+    "packages": [
+      "@elevenlabs/cli@latest"
+    ]
+  }
+}

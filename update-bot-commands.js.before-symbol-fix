@@ -1,0 +1,81 @@
+const fs = require('fs');
+const path = require('path');
+
+const home = process.env.HOME;
+const sourcePath = path.join(home, 'bot-friend.js');
+const listPath = path.join(home, 'bot-commands.json');
+const commandsDir = path.join(home, 'commands');
+
+function updateCommands() {
+    const source = fs.readFileSync(sourcePath, 'utf8');
+
+    let oldList = [];
+    try {
+        const data = JSON.parse(fs.readFileSync(listPath, 'utf8'));
+        if (Array.isArray(data)) oldList = data;
+    } catch (_) {}
+
+    const commands = new Map();
+
+    function addCommand(value) {
+        if (typeof value !== 'string') return;
+        const name = value.trim().replace(/^\./, '');
+        if (!name || /[\r\n]/.test(name)) return;
+
+        const key = name.toLowerCase();
+        if (!commands.has(key)) commands.set(key, name);
+    }
+
+    // الحفاظ على القائمة الحالية
+    oldList.forEach(addCommand);
+
+    // استخراج الأوامر المكتوبة مباشرة داخل البوت
+    for (const match of source.matchAll(
+        /command\s*===\s*['"]([^'"]+)['"]/g
+    )) {
+        addCommand(match[1]);
+    }
+
+    // استخراج أسماء الأوامر من ملفات JS المفعلة
+    if (fs.existsSync(commandsDir)) {
+        for (const file of fs.readdirSync(commandsDir)) {
+            if (!file.endsWith('.js')) continue;
+            if (file.endsWith('.disabled.js')) continue;
+
+            const fullPath = path.join(commandsDir, file);
+
+            try {
+                const content = fs.readFileSync(fullPath, 'utf8');
+                const match = content.match(
+                    /\bname\s*:\s*['"]([^'"]+)['"]/
+                );
+                if (match) addCommand(match[1]);
+            } catch (err) {
+                console.error('تعذر فحص الملف:', file, err.message);
+            }
+        }
+    }
+
+    // الأوامر التي لا تظهر بصيغة command ===
+    [
+        'حزمة', 'اغنية', 'ارسل',
+        'تست', 'تست 1', 'تست 2',
+        'تست 3', 'تست 4', 'تست 5'
+    ].forEach(addCommand);
+
+    const result = [...commands.values()].filter(command => command.toLowerCase() !== 'test 5');
+
+    fs.writeFileSync(
+        listPath,
+        JSON.stringify(result, null, 2) + '\n'
+    );
+
+    console.log('✅ تم تحديث قائمة الأوامر');
+    console.log('📋 عدد الأوامر:', result.length);
+    console.log('⚡ أمر speed:', result.some(x => x.toLowerCase() === 'speed') ? 'موجود' : 'غير موجود');
+    console.log('🔎 أمر حزمة:', result.includes('حزمة') ? 'موجود' : 'غير موجود');
+    console.log('🔁 التكرار: تمت إزالة التكرارات دون اعتبار اختلاف الحروف الإنجليزية');
+}
+
+if (require.main === module) updateCommands();
+module.exports = updateCommands;

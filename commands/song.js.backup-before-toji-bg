@@ -1,0 +1,253 @@
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+const yts = require('yt-search');
+const sharp = require('sharp');
+
+const activeChats = new Set();
+
+function xml(v) {
+    return String(v || 'غير معروف')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function shorten(v, max) {
+    const s = String(v || 'غير معروف').replace(/\s+/g, ' ').trim();
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+async function makeCard(title, channel, duration) {
+    const t = xml(shorten(title, 62));
+    const c = xml(shorten(channel, 42));
+    const d = xml(duration || 'غير معروف');
+
+    const svg = [
+      '<svg width="1080" height="720" xmlns="http://www.w3.org/2000/svg">',
+      '<defs>',
+      '<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">',
+      '<stop offset="0%" stop-color="#080510"/>',
+      '<stop offset="55%" stop-color="#21083d"/>',
+      '<stop offset="100%" stop-color="#030208"/>',
+      '</linearGradient>',
+      '<linearGradient id="neon" x1="0" y1="0" x2="1" y2="0">',
+      '<stop offset="0%" stop-color="#8b5cf6"/>',
+      '<stop offset="50%" stop-color="#e879f9"/>',
+      '<stop offset="100%" stop-color="#7c3aed"/>',
+      '</linearGradient>',
+      '</defs>',
+      '<rect width="1080" height="720" rx="32" fill="url(#bg)"/>',
+      '<g opacity=".18" stroke="#c084fc" stroke-width="2" fill="none">',
+      '<circle cx="870" cy="150" r="110"/>',
+      '<circle cx="870" cy="150" r="150"/>',
+      '<path d="M0 150 L1080 600 M100 0 L900 720"/>',
+      '</g>',
+      '<rect x="28" y="28" width="1024" height="664" rx="28" fill="none" stroke="url(#neon)" stroke-width="3"/>',
+      '<text x="540" y="92" text-anchor="middle" font-family="Arial" font-size="39" font-weight="bold" fill="#f3e8ff">𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐</text>',
+      '<text x="540" y="139" text-anchor="middle" font-family="Arial" font-size="25" letter-spacing="7" fill="#c084fc">AUDIO SEARCH</text>',
+      '<path d="M75 170 H1005" stroke="url(#neon)" stroke-width="3"/>',
+      '<circle cx="180" cy="350" r="112" fill="#130922" stroke="#a855f7" stroke-width="5"/>',
+      '<circle cx="180" cy="350" r="80" fill="none" stroke="#d8b4fe" stroke-width="3"/>',
+      '<circle cx="180" cy="350" r="22" fill="#c084fc"/>',
+      '<g fill="#d8b4fe">',
+      '<rect x="166" y="240" width="28" height="65" rx="12"/>',
+      '<rect x="166" y="395" width="28" height="65" rx="12"/>',
+      '<rect x="70" y="336" width="65" height="28" rx="12"/>',
+      '<rect x="225" y="336" width="65" height="28" rx="12"/>',
+      '</g>',
+      '<text x="340" y="238" font-family="Arial" font-size="27" fill="#c084fc">TRACK TITLE</text>',
+      '<text x="340" y="286" font-family="Arial" font-size="30" font-weight="bold" fill="#ffffff">' + t + '</text>',
+      '<path d="M340 310 H970" stroke="#6b21a8" stroke-width="2"/>',
+      '<text x="340" y="365" font-family="Arial" font-size="27" fill="#c084fc">ARTIST / CHANNEL</text>',
+      '<text x="340" y="410" font-family="Arial" font-size="29" fill="#ffffff">' + c + '</text>',
+      '<path d="M340 435 H970" stroke="#6b21a8" stroke-width="2"/>',
+      '<text x="340" y="485" font-family="Arial" font-size="27" fill="#c084fc">DURATION</text>',
+      '<text x="510" y="485" font-family="Arial" font-size="29" fill="#ffffff">' + d + '</text>',
+      '<g fill="url(#neon)">',
+      '<rect x="90" y="540" width="13" height="35" rx="6"/>',
+      '<rect x="115" y="520" width="13" height="55" rx="6"/>',
+      '<rect x="140" y="500" width="13" height="75" rx="6"/>',
+      '<rect x="165" y="530" width="13" height="45" rx="6"/>',
+      '<rect x="190" y="495" width="13" height="80" rx="6"/>',
+      '<rect x="215" y="515" width="13" height="60" rx="6"/>',
+      '<rect x="240" y="535" width="13" height="40" rx="6"/>',
+      '<rect x="265" y="505" width="13" height="70" rx="6"/>',
+      '</g>',
+      '<rect x="330" y="525" width="650" height="75" rx="18" fill="#10051d" stroke="#a855f7" stroke-width="2"/>',
+      '<text x="655" y="572" text-anchor="middle" font-family="Arial" font-size="29" font-weight="bold" fill="#f5d0fe" direction="rtl">جاري تحميل الأغنية...</text>',
+      '<text x="540" y="650" text-anchor="middle" font-family="Arial" font-size="23" letter-spacing="5" fill="#c084fc">MUSIC • POWER • FOREVER</text>',
+      '</svg>'
+    ].join('');
+
+    return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+function runYtDlp(args) {
+    return new Promise((resolve, reject) => {
+        execFile('yt-dlp', args, {
+            timeout: 180000,
+            maxBuffer: 2 * 1024 * 1024,
+            encoding: 'utf8'
+        }, (error, stdout, stderr) => {
+            if (error) {
+                reject(new Error(String(stderr || error.message).trim().slice(-1000)));
+                return;
+            }
+            const result = String(stdout || '').trim().split(/\r?\n/).filter(Boolean).pop();
+            if (!result) return reject(new Error('لم يتم العثور على مسار الصوت'));
+            resolve(result);
+        });
+    });
+}
+
+async function execute({ sock, from, mek, query }) {
+    query = String(query || '').trim();
+
+    if (!query) {
+        await sock.sendMessage(from, {
+            text: '🎵 اكتب اسم الأغنية بعد الأمر .اغنية'
+        }, { quoted: mek });
+        return;
+    }
+
+    if (activeChats.has(from)) {
+        await sock.sendMessage(from, {
+            text: '⏳ كاين تحميل أغنية آخر فهاد المحادثة، تسنّى حتى يسالي.'
+        }, { quoted: mek });
+        return;
+    }
+
+    activeChats.add(from);
+    const started = Date.now();
+    let tempDir;
+
+    try {
+        const searchStart = Date.now();
+        const search = await yts(query);
+        const result = search?.videos?.find(v => v && v.url);
+
+        console.log('[SONG] search_ms=' + (Date.now() - searchStart));
+
+        if (!result) {
+            await sock.sendMessage(from, {
+                text: '❌ ما لقيتش نتيجة مناسبة. جرّب اسم الأغنية مع اسم الفنان.'
+            }, { quoted: mek });
+            return;
+        }
+
+        const title = result.title || query;
+        const channel = result.author?.name || result.author || 'غير معروف';
+        const duration = result.timestamp || 'غير معروف';
+
+        try {
+            const card = await makeCard(title, channel, duration);
+            await sock.sendMessage(from, {
+                image: card,
+                mimetype: 'image/png',
+                caption: '🎧 *AUDIO SEARCH*\n> 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐'
+            }, { quoted: mek });
+        } catch (e) {
+            console.error('[SONG CARD ERROR]', e.message);
+            await sock.sendMessage(from, {
+                text: '🎧 *AUDIO SEARCH*\n🎵 ' + shorten(title, 100) +
+                '\n👤 ' + shorten(channel, 60) +
+                '\n⏱️ ' + duration +
+                '\n> 𝑻𝒐𝒋𝒊 𝑭𝒖𝒔𝒉𝒊𝒈𝒖𝒓𝒐'
+            }, { quoted: mek });
+        }
+
+        tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'toji-song-'));
+
+        const common = [
+            '--js-runtimes', 'node',
+            '--remote-components', 'ejs:github',
+            '--no-playlist',
+            '--no-warnings',
+            '--quiet',
+            '-N', '4',
+            '--max-filesize', '25M'
+        ];
+
+        let audioPath;
+        let audioType;
+        let downloadStart = Date.now();
+
+        try {
+            audioPath = await runYtDlp([
+                ...common,
+                '-f', 'bestaudio[ext=m4a]',
+                '-o', path.join(tempDir, 'direct.%(ext)s'),
+                '--print', 'after_move:filepath',
+                result.url
+            ]);
+            audioType = 'm4a';
+            console.log('[SONG] direct_m4a_ms=' + (Date.now() - downloadStart));
+        } catch (e) {
+            console.log('[SONG] M4A fallback:', e.message.slice(0, 250));
+            downloadStart = Date.now();
+            audioPath = await runYtDlp([
+                ...common,
+                '-f', 'bestaudio/best',
+                '-x',
+                '--audio-format', 'mp3',
+                '-o', path.join(tempDir, 'fallback.%(ext)s'),
+                '--print', 'after_move:filepath',
+                result.url
+            ]);
+            audioType = 'mp3';
+            console.log('[SONG] fallback_mp3_ms=' + (Date.now() - downloadStart));
+        }
+
+        const resolved = path.resolve(audioPath);
+        if (!resolved.startsWith(path.resolve(tempDir) + path.sep)) {
+            throw new Error('مسار ملف الصوت غير آمن');
+        }
+
+        const stat = await fs.promises.stat(resolved);
+        if (!stat.isFile() || stat.size < 1 || stat.size > 25 * 1024 * 1024) {
+            throw new Error('حجم ملف الصوت غير صالح');
+        }
+
+        const audio = await fs.promises.readFile(resolved);
+        const sendStart = Date.now();
+
+        await sock.sendMessage(from, {
+            audio,
+            mimetype: audioType === 'm4a' ? 'audio/mp4' : 'audio/mpeg',
+            fileName: audioType === 'm4a' ? 'song.m4a' : 'song.mp3'
+        }, { quoted: mek });
+
+        console.log('[SONG] format=' + audioType +
+            ' bytes=' + stat.size +
+            ' send_ms=' + (Date.now() - sendStart) +
+            ' total_ms=' + (Date.now() - started) +
+            ' title=' + shorten(title, 100));
+
+    } catch (err) {
+        console.error('[SONG ERROR]', err.stack || err.message);
+        try {
+            await sock.sendMessage(from, {
+                text: '⚠️ تعذّر جلب الصوت. جرّب لاحقاً أو اختار أغنية أخرى.'
+            }, { quoted: mek });
+        } catch (e) {
+            console.error('[SONG ERROR] send:', e.message);
+        }
+    } finally {
+        activeChats.delete(from);
+        if (tempDir) {
+            try {
+                await fs.promises.rm(tempDir, { recursive: true, force: true });
+            } catch (e) {
+                console.error('[SONG CLEANUP]', e.message);
+            }
+        }
+    }
+}
+
+module.exports = { name: 'اغنية', execute };

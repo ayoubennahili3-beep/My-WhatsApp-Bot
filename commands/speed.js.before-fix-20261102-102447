@@ -1,0 +1,50 @@
+const fs = require('fs');
+const path = require('path');
+
+module.exports = {
+    name: 'speed',
+    async execute(sock, m, args) {
+        const start = Date.now();
+        const sentMsg = await sock.sendMessage(m.key.remoteJid, { text: '⚡ جاري تحليل الأداء...' }, { quoted: m });
+        const latency = Date.now() - start;
+
+        const statsFile = path.join(process.env.HOME, 'bot-speed-stats.json');
+        if (!fs.existsSync(statsFile)) {
+            return await sock.sendMessage(m.key.remoteJid, { text: `🚀 **السرعة:** ${latency}ms\n⚠️ لا توجد إحصائيات أوامر محفوظة بعد.` }, { quoted: sentMsg });
+        }
+
+        const data = JSON.parse(fs.readFileSync(statsFile, 'utf8'));
+        const commands = data.commands || {};
+        
+        const sortedByAvg = Object.entries(commands)
+            .sort((a, b) => a[1].avgMs - b[1].avgMs);
+
+        const fastest = sortedByAvg[0];
+        const slowest = sortedByAvg[sortedByAvg.length - 1];
+        
+        const totalExecutions = Object.values(commands).reduce((sum, item) => sum + item.count, 0);
+        const totalTime = Object.values(commands).reduce((sum, item) => sum + item.totalMs, 0);
+        const globalAvg = totalExecutions > 0 ? (totalTime / totalExecutions) : 0;
+
+        let report = `⚡ **تقرير الأداء الحقيقي:**\n\n`;
+        report += `📡 **سرعة الاتصال (Ping):** ${latency}ms\n`;
+        report += `⏱️ **متوسط سرعة الأوامر:** ${globalAvg.toFixed(2)}ms\n`;
+        report += `🔢 **إجمالي الأوامر المنفذة:** ${totalExecutions}\n\n`;
+
+        if (fastest && slowest) {
+            report += `🚀 **أسرع أمر:** .${fastest[0]} (${fastest[1].avgMs.toFixed(2)}ms)\n`;
+            report += `🐢 **أبطأ أمر:** .${slowest[0]} (${slowest[1].avgMs.toFixed(2)}ms)\n\n`;
+        }
+
+        report += `📊 **أكثر 3 أوامر استعمالاً:**\n`;
+        const top3 = Object.entries(commands)
+            .sort((a, b) => b[1].count - a[1].count)
+            .slice(0, 3);
+        
+        top3.forEach(([cmd, item], i) => {
+            report += `${i+1}. .${cmd} (${item.count} مرة، متوسط ${item.avgMs.toFixed(2)}ms)\n`;
+        });
+
+        await sock.sendMessage(m.key.remoteJid, { text: report }, { quoted: sentMsg });
+    }
+};
